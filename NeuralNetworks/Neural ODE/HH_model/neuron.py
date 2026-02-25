@@ -73,9 +73,6 @@ class SingleNeuron(eqx.Module):
         return hh.resting_state(V0)
 
 
-# ============================================================
-# Quick Test
-# ============================================================
 if __name__ == "__main__":
     from HH_NeuralODE import create_model
     import jax

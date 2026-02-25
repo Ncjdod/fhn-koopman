@@ -44,10 +44,11 @@ class HodgkinHuxley:
     def alpha_m(V):
         """Na+ activation rate."""
         dV = V + 40.0
+        safe_dV = jnp.where(jnp.abs(dV) < 1e-6, 1.0, dV)
         return jnp.where(
             jnp.abs(dV) < 1e-6,
-            1.0,  # L'Hopital limit
-            0.1 * dV / (1.0 - jnp.exp(-dV / 10.0))
+            1.0,  
+            0.1 * safe_dV / (1.0 - jnp.exp(-safe_dV / 10.0))
         )
     
     @staticmethod
@@ -69,10 +70,11 @@ class HodgkinHuxley:
     def alpha_n(V):
         """K+ activation rate."""
         dV = V + 55.0
+        safe_dV = jnp.where(jnp.abs(dV) < 1e-6, 1.0, dV)
         return jnp.where(
             jnp.abs(dV) < 1e-6,
-            0.1,  # L'Hopital limit
-            0.01 * dV / (1.0 - jnp.exp(-dV / 10.0))
+            0.1,  
+            0.01 * safe_dV / (1.0 - jnp.exp(-safe_dV / 10.0))
         )
     
     @staticmethod
@@ -168,16 +170,12 @@ class HodgkinHuxley:
         ])
 
 
-# ============================================================
-# Quick Test
-# ============================================================
 if __name__ == "__main__":
     print("Hodgkin-Huxley Model Test")
     print("=" * 40)
     
     hh = HodgkinHuxley()
     
-    # Resting state
     y0 = hh.resting_state()
     print(f"Resting state: V={y0[0]:.1f}mV, m={y0[1]:.4f}, h={y0[2]:.4f}, n={y0[3]:.4f}")
     
