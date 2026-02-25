@@ -71,8 +71,7 @@ class HHNeuralODE(eqx.Module):
     where y = [V, m, h, n].
     """
     fourier: FourierFeatures
-    layers: list
-    output_layer: eqx.nn.Linear
+    mlp: eqx.nn.MLP
 
     def __init__(self, n_fourier=32, sigma=1.0, *, key):
         """
