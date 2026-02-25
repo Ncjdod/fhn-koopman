@@ -261,7 +261,7 @@ def get_curriculum_data(t_full, v_full, c_full, T_window):
 # ============================================================
 def make_shooting_train_step(model_optimizer, weights_optimizer,
                               hh, all_ics, t_segments, V_segments,
-                              t_data, c_data, adjoint=None):
+                              c_segments, adjoint=None):
     """
     Create a JIT-compiled minimax training step function.
 
@@ -284,8 +284,7 @@ def make_shooting_train_step(model_optimizer, weights_optimizer,
         all_ics:            (K, 4) data-pinned initial conditions
         t_segments:         (K, n_pts_per_seg) time arrays per segment
         V_segments:         (K, n_pts_per_seg) target voltage per segment
-        t_data:             Full time array for I_ext interpolation (fixed shape)
-        c_data:             Full current array in pA (fixed shape)
+        c_segments:         (K, n_pts_per_seg) current arrays in pA per segment
         adjoint:            Diffrax adjoint method (None = RecursiveCheckpointAdjoint)
 
     Returns:
@@ -316,8 +315,7 @@ def make_shooting_train_step(model_optimizer, weights_optimizer,
         def model_loss(model):
             return shooting_combined_loss(
                 model, loss_weights, hh,
-                all_ics, t_segments, V_segments,
-                t_data, c_data,
+                all_ics, t_segments, V_segments, c_segments,
                 V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
                 physics_weight, continuity_weight,
                 adjoint=adjoint
@@ -330,8 +328,7 @@ def make_shooting_train_step(model_optimizer, weights_optimizer,
         def weight_loss(loss_weights):
             return shooting_combined_loss(
                 model, loss_weights, hh,
-                all_ics, t_segments, V_segments,
-                t_data, c_data,
+                all_ics, t_segments, V_segments, c_segments,
                 V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
                 physics_weight, continuity_weight,
                 adjoint=adjoint
@@ -339,20 +336,17 @@ def make_shooting_train_step(model_optimizer, weights_optimizer,
 
         (_, _), weight_grads = weight_loss(loss_weights)
 
-        # --- Update model (descent) ---
         model_updates, model_opt_state_new = model_optimizer.update(
             model_grads, model_opt_state, model
         )
         model = eqx.apply_updates(model, model_updates)
 
-        # --- Update weights (ascent = negate grads for optax) ---
         neg_weight_grads = jax.tree.map(lambda g: -g, weight_grads)
         weight_updates, weights_opt_state_new = weights_optimizer.update(
             neg_weight_grads, weights_opt_state, loss_weights
         )
         loss_weights = eqx.apply_updates(loss_weights, weight_updates)
 
-        # --- Clamp adversarial log-weights to prevent runaway ---
         loss_weights = eqx.tree_at(
             lambda lw: lw.log_weights,
             loss_weights,
@@ -364,9 +358,6 @@ def make_shooting_train_step(model_optimizer, weights_optimizer,
     return step
 
 
-# ============================================================
-# Visualization
-# ============================================================
 def plot_progress(model, hh, t_data, v_data, c_data, I_ext_fn,
                   epoch, info, loss_history, n_segments=None,
                   save_dir="HH_model"):
@@ -631,7 +622,7 @@ def train(config=None):
             train_step_fn = make_shooting_train_step(
                 model_optimizer, weights_optimizer,
                 hh, all_ics, t_segments, V_segments,
-                t_full, c_full, adjoint=adjoint
+                c_segments, adjoint=adjoint
             )
 
         # Skip if data too sparse (from stage init above)

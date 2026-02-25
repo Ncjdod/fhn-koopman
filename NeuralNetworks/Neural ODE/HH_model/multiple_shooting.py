@@ -22,9 +22,6 @@ from HodgkinHuxley import HodgkinHuxley
 from physics_loss import adversarial_physics_loss
 
 
-# ============================================================
-# Segment Construction
-# ============================================================
 def compute_segment_boundaries(t_data, n_segments):
     """
     Compute evenly spaced boundary times dividing [t_data[0], t_data[-1]].
@@ -77,7 +74,6 @@ def build_segment_arrays(t_data, V_data, c_data, boundaries, n_pts_per_seg, hh):
         V_segs.append(V_seg)
         c_segs.append(c_seg)
 
-        # 4D IC from data: [V, m_inf(V), h_inf(V), n_inf(V)]
         V0 = V_seg[0]
         ics.append(hh.resting_state(V0))
 
@@ -89,25 +85,21 @@ def build_segment_arrays(t_data, V_data, c_data, boundaries, n_pts_per_seg, hh):
     return t_segments, V_segments, c_segments, all_ics
 
 
-# ============================================================
-# Parallel Integration
-# ============================================================
-def integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
+
+def integrate_all_segments(model, all_ics, t_segments, c_segments,
                            dt0=0.01, rtol=1e-3, atol=1e-5, max_steps=4096,
                            adjoint=None):
     """
     Integrate all K segments in parallel using jax.vmap.
 
     Each segment uses the shared model but independent IC and time span.
-    External current is interpolated from the full data arrays (captured
-    in the closure, safe for vmap).
+    External current is interpolated from the segment data arrays.
 
     Args:
         model:       HHNeuralODE (shared across segments)
         all_ics:     (K, 4) initial conditions [V, m, h, n] from data
         t_segments:  (K, n_pts_per_seg) time arrays
-        t_data:      Full time array (for I_ext interpolation)
-        c_data:      Full current array in pA (for I_ext interpolation)
+        c_segments:  (K, n_pts_per_seg) current arrays in pA
         dt0:         Initial step size
         rtol, atol:  Tolerances
         max_steps:   Max ODE solver steps per segment
@@ -117,18 +109,15 @@ def integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
     Returns:
         all_trajectories: (K, n_pts_per_seg, 4) predicted trajectories
     """
-    def _single_segment(y0, t_span):
-        I_ext_fn = lambda t: jnp.interp(t, t_data, c_data)
+    def _single_segment(y0, t_span, c_span):
+        I_ext_fn = lambda t: jnp.interp(t, t_span, c_span)
         return integrate(model, y0, t_span, I_ext_fn,
                          dt0=dt0, rtol=rtol, atol=atol, max_steps=max_steps,
                          adjoint=adjoint)
 
-    return jax.vmap(_single_segment)(all_ics, t_segments)
+    return jax.vmap(_single_segment)(all_ics, t_segments, c_segments)
 
 
-# ============================================================
-# Loss Functions
-# ============================================================
 def continuity_loss(all_trajectories, all_ics):
     """
     Penalize discontinuities at segment boundaries.
@@ -143,9 +132,7 @@ def continuity_loss(all_trajectories, all_ics):
     Returns:
         loss: scalar
     """
-    # End state of each segment's integration (except last segment)
     y_ends = all_trajectories[:-1, -1, :]     # (K-1, 4)
-    # Data value at start of next segment
     y_next_starts = all_ics[1:, :]            # (K-1, 4)
 
     gaps = y_ends - y_next_starts
@@ -180,7 +167,7 @@ def shooting_gating_penalty(all_trajectories):
     m = all_trajectories[:, :, 1]
     h = all_trajectories[:, :, 2]
     n = all_trajectories[:, :, 3]
-    penalty = jnp.mean(
+    penalty = jnp.max(
         jnp.maximum(0.0, -m) + jnp.maximum(0.0, m - 1.0) +
         jnp.maximum(0.0, -h) + jnp.maximum(0.0, h - 1.0) +
         jnp.maximum(0.0, -n) + jnp.maximum(0.0, n - 1.0)
@@ -189,8 +176,7 @@ def shooting_gating_penalty(all_trajectories):
 
 
 def shooting_combined_loss(model, loss_weights, hh,
-                           all_ics, t_segments, V_segments,
-                           t_data, c_data,
+                           all_ics, t_segments, V_segments, c_segments,
                            V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
                            physics_weight, continuity_weight,
                            adjoint=None):
@@ -207,8 +193,7 @@ def shooting_combined_loss(model, loss_weights, hh,
         all_ics:           (K, 4) data-pinned initial conditions
         t_segments:        (K, n_pts_per_seg) time arrays
         V_segments:        (K, n_pts_per_seg) target voltage
-        t_data:            Full time array for I_ext interpolation
-        c_data:            Full current array in pA for I_ext interpolation
+        c_segments:        (K, n_pts_per_seg) current arrays in pA
         V_colloc, t_colloc: Collocation points for physics loss
         I_colloc_model:    Collocation current in pA (for neural ODE)
         I_colloc_hh:       Collocation current in uA/cm2 (for HH)
@@ -220,11 +205,9 @@ def shooting_combined_loss(model, loss_weights, hh,
         total_loss: scalar
         info: dict with component losses
     """
-    # Parallel integration of all segments
-    all_trajs = integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
+    all_trajs = integrate_all_segments(model, all_ics, t_segments, c_segments,
                                        adjoint=adjoint)
 
-    # Component losses
     d_loss = shooting_data_loss(all_trajs, V_segments)
     c_loss = continuity_loss(all_trajs, all_ics)
     g_penalty = shooting_gating_penalty(all_trajs)
@@ -252,9 +235,6 @@ def shooting_combined_loss(model, loss_weights, hh,
     return total, info
 
 
-# ============================================================
-# Quick Test
-# ============================================================
 if __name__ == "__main__":
     from HH_NeuralODE import create_model
     from physics_loss import LossWeights
@@ -269,12 +249,11 @@ if __name__ == "__main__":
     # Fake data: 10ms, 100 points
     t_data = jnp.linspace(0.0, 10.0, 100)
     V_data = -65.0 + 5.0 * jnp.sin(2 * jnp.pi * t_data / 10.0)
-    c_data = jnp.ones(100) * 200.0  # 200 pA
+    c_data = jnp.ones(100) * 200.0 
 
     n_segments = 3
     n_pts_per_seg = 20
 
-    # Build segments
     boundaries = compute_segment_boundaries(t_data, n_segments)
     print(f"Boundaries: {boundaries}")
 
@@ -285,20 +264,16 @@ if __name__ == "__main__":
     print(f"V_segments shape: {V_segs.shape}")
     print(f"all_ics shape:    {all_ics.shape}")  # (3, 4)
 
-    # Parallel integration
     print("\nRunning parallel integration...")
-    all_trajs = integrate_all_segments(model, all_ics, t_segs, t_data, c_data)
+    all_trajs = integrate_all_segments(model, all_ics, t_segs, c_segs)
     print(f"all_trajectories shape: {all_trajs.shape}")  # (3, 20, 4)
 
-    # Continuity loss
     c_loss = continuity_loss(all_trajs, all_ics)
     print(f"Continuity loss: {c_loss:.6f}")
 
-    # Data loss
     d_loss = shooting_data_loss(all_trajs, V_segs)
     print(f"Data loss: {d_loss:.6f}")
 
-    # Combined loss with dual current units
     loss_weights = LossWeights(n_terms=64, init_value=0.0)
     V_colloc = jax.random.uniform(key, (64,), minval=-80.0, maxval=40.0)
     t_colloc = jax.random.uniform(key, (64,), minval=0.0, maxval=10.0)
@@ -308,8 +283,7 @@ if __name__ == "__main__":
 
     total, info = shooting_combined_loss(
         model, loss_weights, hh,
-        all_ics, t_segs, V_segs,
-        t_data, c_data,
+        all_ics, t_segs, V_segs, c_segs,
         V_colloc, t_colloc, I_colloc_pA, I_colloc_hh,
         physics_weight=1.0, continuity_weight=1.0
     )
