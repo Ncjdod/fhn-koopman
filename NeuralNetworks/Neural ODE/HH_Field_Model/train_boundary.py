@@ -49,6 +49,8 @@ def _load_phase1_model(config_p1):
     skeleton = create_model(
         hidden_dim=config_p1.hidden_dim,
         n_layers=config_p1.n_layers,
+        n_fourier=getattr(config_p1, 'n_fourier', 64),
+        sigma=getattr(config_p1, 'fourier_sigma', 1.0),
         key=key,
     )
     model = eqx.tree_deserialise_leaves(path, skeleton)

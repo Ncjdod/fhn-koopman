@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 
 from config import Phase1Config, Phase2Config
 from hh_reference import HHReference
-from model import create_model
+from model import create_model, safe_euler_step
 from sampler import StateSpaceSampler
 
 
@@ -65,6 +65,8 @@ def load_model(checkpoint_path=None, config=None):
     skeleton = create_model(
         hidden_dim=config.hidden_dim,
         n_layers=config.n_layers,
+        n_fourier=getattr(config, 'n_fourier', 64),
+        sigma=getattr(config, 'fourier_sigma', 1.0),
         key=jax.random.PRNGKey(0),
     )
     model = eqx.tree_deserialise_leaves(checkpoint_path, skeleton)
@@ -72,11 +74,25 @@ def load_model(checkpoint_path=None, config=None):
     return model, checkpoint_path
 
 
-def euler_integrate(step_fn, y0, n_steps, dt):
-    """Simple Euler integration via lax.scan."""
+def euler_integrate(step_fn, y0, n_steps, dt, clip_gates=False):
+    """
+    Euler integration via lax.scan.
+
+    Args:
+        step_fn:    function y -> dy/dt
+        y0:         initial state (4,)
+        n_steps:    number of steps
+        dt:         time step
+        clip_gates: if True, clip y[1:4] to [0,1] after each step (for NN)
+    """
     def scan_step(y, _):
         dy = step_fn(y)
         y_new = y + dt * dy
+        if clip_gates:
+            # Clip gating variables to [0, 1] for integration safety
+            y_new = y_new.at[1].set(jnp.clip(y_new[1], 0.0, 1.0))
+            y_new = y_new.at[2].set(jnp.clip(y_new[2], 0.0, 1.0))
+            y_new = y_new.at[3].set(jnp.clip(y_new[3], 0.0, 1.0))
         return y_new, y
     y_final, trajectory = jax.lax.scan(scan_step, y0, None, length=n_steps)
     # Append final state
@@ -119,7 +135,7 @@ def test_gating_bounds(model, hh, save_dir):
         def step_fn(y):
             return model(y[0], y[1], y[2], y[3], I_ext)
 
-        traj = euler_integrate(step_fn, y0, n_steps, dt)
+        traj = euler_integrate(step_fn, y0, n_steps, dt, clip_gates=True)
         traj_np = np.array(traj)
 
         m_range = (traj_np[:, 1].min(), traj_np[:, 1].max())
@@ -200,7 +216,7 @@ def test_resting_stability(model, hh, save_dir):
     # NN model
     def nn_step(y):
         return model(y[0], y[1], y[2], y[3], 0.0)
-    traj_nn = np.array(euler_integrate(nn_step, y0, n_steps, dt))
+    traj_nn = np.array(euler_integrate(nn_step, y0, n_steps, dt, clip_gates=True))
 
     # HH ground truth
     def hh_step(y):
@@ -275,7 +291,7 @@ def test_action_potential(model, hh, save_dir):
         # NN
         def nn_step(y, I=I_ext):
             return model(y[0], y[1], y[2], y[3], I)
-        traj_nn = np.array(euler_integrate(nn_step, y0, n_steps, dt))
+        traj_nn = np.array(euler_integrate(nn_step, y0, n_steps, dt, clip_gates=True))
 
         # HH
         def hh_step(y, I=I_ext):
@@ -474,7 +490,7 @@ def test_if_curve(model, hh, save_dir):
         # NN
         def nn_step(y, I=I_val):
             return model(y[0], y[1], y[2], y[3], I)
-        traj_nn = np.array(euler_integrate(nn_step, y0, n_steps, dt))
+        traj_nn = np.array(euler_integrate(nn_step, y0, n_steps, dt, clip_gates=True))
         V_nn = traj_nn[:, 0]
         nn_spikes = np.sum(np.diff(np.sign(V_nn - 0.0)) > 0)
         nn_freqs.append(nn_spikes / (T_ms / 1000.0))  # Hz

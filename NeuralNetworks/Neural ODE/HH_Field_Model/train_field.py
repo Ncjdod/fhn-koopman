@@ -83,10 +83,14 @@ def _make_integration_mse_fn():
 
         _, V_hh = jax.lax.scan(hh_step, hh_y0, None, length=n_steps)
 
-        # Euler via lax.scan: NN prediction
+        # Euler via lax.scan: NN prediction (with gate clipping for safety)
         def nn_step(y, _):
             dy = model(y[0], y[1], y[2], y[3], I_ext_val)
             y_new = y + dt * dy
+            # Clip gates to [0,1] to match evaluation-time behavior
+            y_new = y_new.at[1].set(jnp.clip(y_new[1], 0.0, 1.0))
+            y_new = y_new.at[2].set(jnp.clip(y_new[2], 0.0, 1.0))
+            y_new = y_new.at[3].set(jnp.clip(y_new[3], 0.0, 1.0))
             return y_new, y_new[0]
 
         _, V_nn = jax.lax.scan(nn_step, hh_y0, None, length=n_steps)
@@ -190,6 +194,8 @@ def train_phase1(config=None):
     model = create_model(
         hidden_dim=config.hidden_dim,
         n_layers=config.n_layers,
+        n_fourier=getattr(config, 'n_fourier', 64),
+        sigma=getattr(config, 'fourier_sigma', 1.0),
         key=model_key,
     )
 

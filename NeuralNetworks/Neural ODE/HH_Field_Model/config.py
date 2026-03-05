@@ -19,6 +19,8 @@ class Phase1Config:
     hidden_dim = 256
     n_layers = 4          # hidden layers
     activation = "tanh"
+    n_fourier = 64        # Fourier feature pairs (input dim = 2*n_fourier)
+    fourier_sigma = 1.0   # frequency scale (higher = sharper features)
 
     # --- Training ---
     n_epochs = 5000
