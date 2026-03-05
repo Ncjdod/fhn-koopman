@@ -79,7 +79,7 @@ class Config:
     n_loss_weights = 8      # Adversarial weight bins
     log_every = 50          # Print every N epochs
     plot_every = 500        # Plot every N epochs
-    checkpoint_every = 500  # Save checkpoint every N epochs
+    checkpoint_every = 250  # Save checkpoint every N epochs
     checkpoint_dir = "HH_model/checkpoints"
     val_split = 0.8         # Fraction of data for training (rest for validation)
 

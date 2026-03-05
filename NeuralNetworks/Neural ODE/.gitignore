@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ML — model artifacts & data
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+*.npy
+*.npz
+data/
+datasets/
+checkpoints/
+runs/
+wandb/
+mlruns/
+
+# Secrets — critical
+.env
+*.env
+secrets.py
+config/secrets.*
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & outputs
+*.log
+logs/
+outputs/
+results/
+figures/
+*.png
+*.pdf
+*.nwb
+*.eqx
