@@ -14,11 +14,6 @@ import sys
 import time
 import signal
 
-# Try these XLA flags to speed up GPU compilation
-os.environ['XLA_FLAGS'] = (
-    '--xla_gpu_enable_latency_hiding_scheduler=false '
-    '--xla_gpu_graph_level=0'
-)
 # Persistent compilation cache — reuse across runs
 os.environ['JAX_COMPILATION_CACHE_DIR'] = '/tmp/jax_cache'
 os.environ['JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS'] = '0'
