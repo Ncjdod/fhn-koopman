@@ -6,11 +6,13 @@ Learns the HH vector field: f(V, m, h, n, I_ext) -> (dV/dt, dm/dt, dh/dt, dn/dt)
 Architecture:
   Input normalization (5D -> [-1,1])
   -> Random Fourier Features (captures sharp HH nonlinearities)
-  -> MLP(256 x 4 layers, tanh)
+  -> MLP via jax.lax.scan (GPU-friendly, no Python loops)
   -> Derivative clipping (prevents integration divergence)
 
-Fourier features overcome the spectral bias of standard MLPs, enabling
-representation of the sharp exponential rate functions in HH dynamics.
+The MLP uses explicit stacked weight matrices with jax.lax.scan over
+hidden layers. This produces a compact XLA graph where both forward
+and backward passes compile as single loop bodies, avoiding the
+graph explosion that causes GPU compilation to hang.
 
 Gate safety is enforced at INTEGRATION TIME (clip gates to [0,1] after
 each Euler step) rather than in the forward pass, to avoid vanishing
@@ -28,11 +30,23 @@ class VectorFieldNet(eqx.Module):
     """
     Neural network approximation of the HH vector field.
 
-    Input:  (V, m, h, n, I_ext) — 5 scalars
-    Output: (dV/dt, dm/dt, dh/dt, dn/dt) — 4 scalars
+    Input:  (V, m, h, n, I_ext) — 5 scalars or batched
+    Output: (dV/dt, dm/dt, dh/dt, dn/dt) — 4 scalars or batched
+
+    Architecture uses explicit weight matrices (no eqx.nn.MLP) so that
+    hidden layers are stacked into a single array and iterated via
+    jax.lax.scan. This compiles to a single loop in XLA instead of
+    N unrolled matmul subgraphs.
     """
-    mlp: eqx.nn.MLP
-    B: jnp.ndarray          # Fixed random Fourier frequency matrix (not trained)
+    B: jnp.ndarray          # (5, n_fourier) — frozen random Fourier frequencies
+
+    # Explicit MLP weights (stacked for lax.scan)
+    W_in: jnp.ndarray       # (hidden_dim, 2*n_fourier) — input projection
+    b_in: jnp.ndarray       # (hidden_dim,)
+    W_hidden: jnp.ndarray   # (n_layers-1, hidden_dim, hidden_dim) — stacked hidden layers
+    b_hidden: jnp.ndarray   # (n_layers-1, hidden_dim)
+    W_out: jnp.ndarray      # (4, hidden_dim) — output projection
+    b_out: jnp.ndarray      # (4,)
 
     # Normalization parameters
     _v_center: float = -20.0
@@ -53,40 +67,59 @@ class VectorFieldNet(eqx.Module):
             sigma:       Std of random frequency matrix (higher = sharper features)
             key:         JAX PRNG key
         """
-        key_B, key_mlp = jax.random.split(key)
+        n_hidden = max(n_layers - 1, 0)
+        keys = jax.random.split(key, 3 + n_hidden)
+        key_B, key_in, key_out = keys[0], keys[1], keys[2]
+        hidden_keys = keys[3:]
 
         # Fixed random Fourier frequency matrix: (5, n_fourier)
         self.B = jax.random.normal(key_B, (5, n_fourier)) * sigma
 
         fourier_dim = 2 * n_fourier  # sin + cos
-        self.mlp = eqx.nn.MLP(
-            in_size=fourier_dim,
-            out_size=4,
-            width_size=hidden_dim,
-            depth=n_layers,
-            activation=jnp.tanh,
-            key=key_mlp,
-        )
+        init = jax.nn.initializers.lecun_normal()
 
-    def normalize(self, V, m, h, n, I_ext):
-        """Normalize inputs to approximately [-1, 1]."""
-        V_norm = (V - self._v_center) / self._v_scale
-        m_norm = 2.0 * m - 1.0
-        h_norm = 2.0 * h - 1.0
-        n_norm = 2.0 * n - 1.0
-        I_norm = (I_ext - self._i_center) / self._i_scale
-        return jnp.array([V_norm, m_norm, h_norm, n_norm, I_norm])
+        # Input layer: fourier_dim -> hidden_dim
+        self.W_in = init(key_in, (hidden_dim, fourier_dim))
+        self.b_in = jnp.zeros(hidden_dim)
 
-    def fourier_embed(self, x_norm):
+        # Hidden layers: stacked for lax.scan
+        if n_hidden > 0:
+            W_list = [init(hidden_keys[i], (hidden_dim, hidden_dim))
+                      for i in range(n_hidden)]
+            self.W_hidden = jnp.stack(W_list)          # (n_hidden, hidden_dim, hidden_dim)
+            self.b_hidden = jnp.zeros((n_hidden, hidden_dim))
+        else:
+            self.W_hidden = jnp.zeros((0, hidden_dim, hidden_dim))
+            self.b_hidden = jnp.zeros((0, hidden_dim))
+
+        # Output layer: hidden_dim -> 4
+        self.W_out = init(key_out, (4, hidden_dim))
+        self.b_out = jnp.zeros(4)
+
+    def _forward(self, x_fourier):
         """
-        Random Fourier features: project input through fixed random matrix
-        then apply sin/cos to capture high-frequency content.
+        Core MLP forward pass using lax.scan. No Python loops.
 
-        gamma(x) = [sin(2*pi*x@B), cos(2*pi*x@B)]
+        Works for both single-point (D,) and batch (N, D) inputs
+        because matmul and broadcasting handle both shapes identically.
         """
-        B = jax.lax.stop_gradient(self.B)  # Never train the frequency matrix
-        proj = 2.0 * jnp.pi * x_norm @ B   # (n_fourier,)
-        return jnp.concatenate([jnp.sin(proj), jnp.cos(proj)])  # (2*n_fourier,)
+        # Input layer
+        x = jnp.tanh(x_fourier @ self.W_in.T + self.b_in)
+
+        # Hidden layers via lax.scan — single loop body in XLA
+        def scan_body(x, wb):
+            w, b = wb
+            return jnp.tanh(x @ w.T + b), None
+
+        x, _ = jax.lax.scan(scan_body, x, (self.W_hidden, self.b_hidden))
+
+        # Output layer (no activation)
+        raw = x @ self.W_out.T + self.b_out
+
+        # Derivative clipping (broadcasts for both (4,) and (N, 4))
+        clip_vals = jnp.array([self._dV_clip, self._dgate_clip,
+                               self._dgate_clip, self._dgate_clip])
+        return jnp.clip(raw, -clip_vals, clip_vals)
 
     def __call__(self, V, m, h, n, I_ext):
         """
@@ -95,24 +128,26 @@ class VectorFieldNet(eqx.Module):
         Returns:
             dydt: (4,) array [dV/dt, dm/dt, dh/dt, dn/dt]
         """
-        x_norm = self.normalize(V, m, h, n, I_ext)
-        x_fourier = self.fourier_embed(x_norm)
-        raw = self.mlp(x_fourier)
+        # Normalize to ~[-1, 1]
+        V_norm = (V - self._v_center) / self._v_scale
+        m_norm = 2.0 * m - 1.0
+        h_norm = 2.0 * h - 1.0
+        n_norm = 2.0 * n - 1.0
+        I_norm = (I_ext - self._i_center) / self._i_scale
+        x_norm = jnp.array([V_norm, m_norm, h_norm, n_norm, I_norm])
 
-        # Clip to prevent integration divergence
-        dV = jnp.clip(raw[0], -self._dV_clip, self._dV_clip)
-        dm = jnp.clip(raw[1], -self._dgate_clip, self._dgate_clip)
-        dh = jnp.clip(raw[2], -self._dgate_clip, self._dgate_clip)
-        dn = jnp.clip(raw[3], -self._dgate_clip, self._dgate_clip)
+        # Fourier embed
+        B = jax.lax.stop_gradient(self.B)
+        proj = 2.0 * jnp.pi * x_norm @ B
+        x_fourier = jnp.concatenate([jnp.sin(proj), jnp.cos(proj)])
 
-        return jnp.array([dV, dm, dh, dn])
+        return self._forward(x_fourier)
 
     def predict_batch(self, states, I_ext):
         """
-        Batch prediction via native matrix operations (no vmap).
+        Batch prediction via native matrix operations (no vmap, no Python loops).
 
-        Uses batch matmul through each MLP layer directly, which XLA
-        compiles efficiently on GPU (unlike vmap which unrolls the graph).
+        Uses the same _forward() as __call__ — matmul broadcasts over batch dim.
 
         Args:
             states: (N, 4) — each row [V, m, h, n]
@@ -122,36 +157,19 @@ class VectorFieldNet(eqx.Module):
             dydt: (N, 4)
         """
         # Batch normalize: (N, 5)
-        V = states[:, 0]
-        m = states[:, 1]
-        h = states[:, 2]
-        n = states[:, 3]
-
-        V_norm = (V - self._v_center) / self._v_scale
-        m_norm = 2.0 * m - 1.0
-        h_norm = 2.0 * h - 1.0
-        n_norm = 2.0 * n - 1.0
+        V_norm = (states[:, 0] - self._v_center) / self._v_scale
+        m_norm = 2.0 * states[:, 1] - 1.0
+        h_norm = 2.0 * states[:, 2] - 1.0
+        n_norm = 2.0 * states[:, 3] - 1.0
         I_norm = (I_ext - self._i_center) / self._i_scale
-
-        x_norm = jnp.stack([V_norm, m_norm, h_norm, n_norm, I_norm], axis=-1)  # (N, 5)
+        x_norm = jnp.stack([V_norm, m_norm, h_norm, n_norm, I_norm], axis=-1)
 
         # Batch Fourier embedding: (N, 2*n_fourier)
-        B = jax.lax.stop_gradient(self.B)       # (5, n_fourier)
-        proj = 2.0 * jnp.pi * (x_norm @ B)     # (N, n_fourier)
-        x = jnp.concatenate([jnp.sin(proj), jnp.cos(proj)], axis=-1)  # (N, 2*n_fourier)
+        B = jax.lax.stop_gradient(self.B)
+        proj = 2.0 * jnp.pi * (x_norm @ B)
+        x_fourier = jnp.concatenate([jnp.sin(proj), jnp.cos(proj)], axis=-1)
 
-        # Batch MLP forward: x @ W.T + b for each layer
-        for layer in self.mlp.layers[:-1]:
-            x = jnp.tanh(x @ layer.weight.T + layer.bias)  # (N, hidden_dim)
-        x = x @ self.mlp.layers[-1].weight.T + self.mlp.layers[-1].bias  # (N, 4)
-
-        # Derivative clipping
-        dV = jnp.clip(x[:, 0], -self._dV_clip, self._dV_clip)
-        dm = jnp.clip(x[:, 1], -self._dgate_clip, self._dgate_clip)
-        dh = jnp.clip(x[:, 2], -self._dgate_clip, self._dgate_clip)
-        dn = jnp.clip(x[:, 3], -self._dgate_clip, self._dgate_clip)
-
-        return jnp.stack([dV, dm, dh, dn], axis=-1)  # (N, 4)
+        return self._forward(x_fourier)
 
 
 def create_model(hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0, key=None):
@@ -203,7 +221,7 @@ def safe_euler_step(model, y, I_ext, dt):
 # Quick test
 # ================================================================
 if __name__ == "__main__":
-    print("VectorFieldNet — Architecture Test")
+    print("VectorFieldNet -- Architecture Test")
     print("=" * 50)
 
     key = jax.random.PRNGKey(0)
@@ -213,6 +231,16 @@ if __name__ == "__main__":
     params = eqx.filter(model, eqx.is_array)
     n_params = sum(p.size for p in jax.tree.leaves(params))
     print(f"Parameters: {n_params:,}")
+
+    # Verify structure
+    print(f"\nWeight shapes:")
+    print(f"  B:        {model.B.shape}")
+    print(f"  W_in:     {model.W_in.shape}")
+    print(f"  b_in:     {model.b_in.shape}")
+    print(f"  W_hidden: {model.W_hidden.shape}")
+    print(f"  b_hidden: {model.b_hidden.shape}")
+    print(f"  W_out:    {model.W_out.shape}")
+    print(f"  b_out:    {model.b_out.shape}")
 
     # Single point
     V, m, h, n, I_ext = -65.0, 0.05, 0.6, 0.32, 10.0
@@ -243,5 +271,10 @@ if __name__ == "__main__":
     print(f"\nBatch test ({N} points):")
     print(f"  Output shape: {dydt_batch.shape}")
     print(f"  dV/dt range: [{dydt_batch[:, 0].min():.4f}, {dydt_batch[:, 0].max():.4f}]")
+
+    # Verify single == batch for same input
+    dydt_single = model(states[0, 0], states[0, 1], states[0, 2], states[0, 3], I_ext_batch[0])
+    diff = jnp.max(jnp.abs(dydt_single - dydt_batch[0]))
+    print(f"  Single vs batch[0] max diff: {diff:.2e}")
 
     print("\nVectorFieldNet OK!")

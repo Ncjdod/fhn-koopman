@@ -207,23 +207,19 @@ def plot_integration_test(model, hh, I_ext_val=10.0, T_ms=50.0,
     n_steps = int(T_ms / dt)
     t = jnp.linspace(0.0, T_ms, n_steps)
 
-    # Euler integration (HH ground truth)
-    ys_hh = [y0]
-    y = y0
-    for i in range(n_steps - 1):
-        dydt = hh._derivatives_single(y, I_ext_val)
-        y = y + dt * dydt
-        ys_hh.append(y)
-    ys_hh = jnp.stack(ys_hh)
+    # Euler integration via lax.scan (fast, no Python loops)
+    def hh_step(y, _):
+        dV, dm, dh, dn = hh.derivatives(y[0], y[1], y[2], y[3], I_ext_val)
+        dy = jnp.array([dV, dm, dh, dn])
+        return y + dt * dy, y
 
-    # Euler integration (NN)
-    ys_nn = [y0]
-    y = y0
-    for i in range(n_steps - 1):
-        dydt = model(y[0], y[1], y[2], y[3], I_ext_val)
-        y = y + dt * dydt
-        ys_nn.append(y)
-    ys_nn = jnp.stack(ys_nn)
+    _, ys_hh = jax.lax.scan(hh_step, y0, None, length=n_steps)
+
+    def nn_step(y, _):
+        dy = model(y[0], y[1], y[2], y[3], I_ext_val)
+        return y + dt * dy, y
+
+    _, ys_nn = jax.lax.scan(nn_step, y0, None, length=n_steps)
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
 
