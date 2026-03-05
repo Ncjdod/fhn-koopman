@@ -130,10 +130,31 @@ def train_phase1(config=None):
     start_time = time.time()
     best_loss = float('inf')
 
+    # ---- Device check ----
+    print(f"\nJAX backend: {jax.default_backend()}")
+    print(f"JAX devices: {jax.devices()}")
+    if jax.default_backend() != 'gpu':
+        print("WARNING: Not using GPU! Install jax[cuda12] for CUDA support.")
+
+    # ---- Warmup: small batch to trigger JIT compilation ----
+    print(f"\nCompiling train step (one-time cost)...", flush=True)
+    t_compile = time.time()
+
+    key, warmup_key = jax.random.split(key)
+    warmup_states, warmup_I = sampler.mixed_sample(warmup_key, 64, config.physiological_fraction)
+    warmup_dydt = hh.derivatives_batch(warmup_states, warmup_I)
+    _ = step_fn(model, opt_state, warmup_states, warmup_I, warmup_dydt)
+
+    # Force computation to complete (JAX is lazy)
+    jax.block_until_ready(_)
+
+    print(f"Compilation done in {time.time() - t_compile:.1f}s")
+
+    # ---- Training loop ----
     print(f"\nTraining: {config.n_epochs} epochs, batch_size={config.batch_size}")
     print(f"Sampling: {config.physiological_fraction*100:.0f}% physiological, "
           f"{(1-config.physiological_fraction)*100:.0f}% uniform")
-    print()
+    print(flush=True)
 
     for epoch in range(config.n_epochs):
         # Generate fresh batch
@@ -151,7 +172,8 @@ def train_phase1(config=None):
         )
 
         # ---- Logging ----
-        do_log = (epoch % config.log_every == 0)
+        # Epoch 0: always log to confirm training started
+        do_log = (epoch % config.log_every == 0) or epoch == 0
         do_plot = (epoch % config.plot_every == 0) and epoch > 0
         do_val = (epoch % config.val_every == 0) and epoch > 0
         do_ckpt = (epoch % config.checkpoint_every == 0) and epoch > 0
@@ -171,7 +193,7 @@ def train_phase1(config=None):
                       f"MSE dh: {info_np['mse_dh']:.6f} | "
                       f"MSE dn: {info_np['mse_dn']:.6f} | "
                       f"LR: {info_np['lr']:.2e} | "
-                      f"{elapsed:.0f}s")
+                      f"{elapsed:.0f}s", flush=True)
 
             if do_plot:
                 key, plot_key = jax.random.split(key)
