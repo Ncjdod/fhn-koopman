@@ -139,11 +139,12 @@ def boundary_loss(model, V_obs, I_ext_hh, latent_gates, dVdt_obs, t_ms):
     # Predict vector field at all trajectory points
     dydt_pred = model.predict_batch(states, I_ext_hh)  # (T, 4)
 
-    # --- 1. dV/dt consistency ---
+    # --- 1. dV/dt consistency (variance-normalized) ---
     dVdt_pred = dydt_pred[:, 0]
-    dV_loss = jnp.mean((dVdt_pred - dVdt_obs) ** 2)
+    dV_sigma = jnp.maximum(jnp.std(dVdt_obs), 1e-6)
+    dV_loss = jnp.mean(((dVdt_pred - dVdt_obs) / dV_sigma) ** 2)
 
-    # --- 2. Gating consistency ---
+    # --- 2. Gating consistency (variance-normalized) ---
     # Finite-diff derivatives of the latent gating variables
     dm_obs = _finite_diff(m_lat, dt)
     dh_obs = _finite_diff(h_lat, dt)
@@ -153,12 +154,16 @@ def boundary_loss(model, V_obs, I_ext_hh, latent_gates, dVdt_obs, t_ms):
     dh_pred = dydt_pred[:, 2]
     dn_pred = dydt_pred[:, 3]
 
-    gate_loss = (jnp.mean((dm_pred - dm_obs) ** 2) +
-                 jnp.mean((dh_pred - dh_obs) ** 2) +
-                 jnp.mean((dn_pred - dn_obs) ** 2)) / 3.0
+    dm_sigma = jnp.maximum(jnp.std(dm_obs), 1e-6)
+    dh_sigma = jnp.maximum(jnp.std(dh_obs), 1e-6)
+    dn_sigma = jnp.maximum(jnp.std(dn_obs), 1e-6)
+
+    gate_loss = (jnp.mean(((dm_pred - dm_obs) / dm_sigma) ** 2) +
+                 jnp.mean(((dh_pred - dh_obs) / dh_sigma) ** 2) +
+                 jnp.mean(((dn_pred - dn_obs) / dn_sigma) ** 2)) / 3.0
 
     # --- 3. Smoothness of latent variables ---
-    # Penalize second derivative (jerkiness)
+    # Penalize second derivative (jerkiness), normalized by scale
     d2m = jnp.diff(m_lat, n=2)
     d2h = jnp.diff(h_lat, n=2)
     d2n = jnp.diff(n_lat, n=2)
@@ -167,8 +172,12 @@ def boundary_loss(model, V_obs, I_ext_hh, latent_gates, dVdt_obs, t_ms):
                    jnp.mean(d2h ** 2) +
                    jnp.mean(d2n ** 2)) / 3.0
 
+    # Raw (unnormalized) MSE for monitoring
+    dV_mse_raw = jnp.mean((dVdt_pred - dVdt_obs) ** 2)
+
     info = {
         "dV_loss": dV_loss,
+        "dV_mse_raw": dV_mse_raw,
         "gate_loss": gate_loss,
         "smooth_loss": smooth_loss,
     }

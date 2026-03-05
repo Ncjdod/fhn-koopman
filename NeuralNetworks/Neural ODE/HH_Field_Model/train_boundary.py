@@ -74,9 +74,12 @@ def make_train_step(model_optimizer, latent_optimizer, conv_optimizer,
              sampler_key):
 
         # Combined loss over all trainable parameters
-        def loss_fn(model, latent_gates, conversion_factor):
+        # eqx.filter_value_and_grad only differentiates the first arg,
+        # so we pack all trainables into a single tuple.
+        def loss_fn(params_tuple):
+            model_, latent_, conv_ = params_tuple
             return total_phase2_loss(
-                model, latent_gates, conversion_factor,
+                model_, latent_, conv_,
                 V_obs, I_ext_pA, dVdt_obs, t_ms,
                 hh, sampler, sampler_key,
                 field_weight=field_weight,
@@ -85,11 +88,12 @@ def make_train_step(model_optimizer, latent_optimizer, conv_optimizer,
                 field_batch_size=field_batch_size,
             )
 
-        # Compute gradients w.r.t. all three parameter groups
-        (loss, info), (grads_model, grads_latent, grads_conv) = \
-            eqx.filter_value_and_grad(loss_fn, has_aux=True, argnums=(0, 1, 2))(
-                model, latent_gates, conversion_factor
+        # Compute gradients w.r.t. all three parameter groups (packed as tuple)
+        (loss, info), grads_tuple = \
+            eqx.filter_value_and_grad(loss_fn, has_aux=True)(
+                (model, latent_gates, conversion_factor)
             )
+        grads_model, grads_latent, grads_conv = grads_tuple
 
         # Clean NaN/inf gradients
         def clean(g):
@@ -151,9 +155,9 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
     if config_p2 is None:
         config_p2 = Phase2Config()
 
-    print("=" * 60)
-    print("Phase 2: Allen Brain Boundary Condition Fine-Tuning")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("Phase 2: Allen Brain Boundary Condition Fine-Tuning", flush=True)
+    print("=" * 60, flush=True)
 
     # ---- Load Phase 1 model ----
     if model is None:
@@ -179,15 +183,15 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
     I_ext_pA = jnp.array(I_np)
     dVdt_obs = jnp.array(dVdt_np)
 
-    print(f"Data: {len(t_ms)} points, {float(t_ms[-1]):.1f}ms")
+    print(f"Data: {len(t_ms)} points, {float(t_ms[-1]):.1f}ms", flush=True)
 
     # ---- Create latent state + conversion factor ----
     latent_gates = LatentGatingState(V_obs)
     conversion = ConversionFactor(membrane_area_cm2=config_p2.membrane_area_cm2_init)
 
     n_latent = sum(p.size for p in jax.tree.leaves(eqx.filter(latent_gates, eqx.is_array)))
-    print(f"Latent gating parameters: {n_latent}")
-    print(f"Initial membrane area: {float(conversion.membrane_area_um2):.0f} um^2")
+    print(f"Latent gating parameters: {n_latent}", flush=True)
+    print(f"Initial membrane area: {float(conversion.membrane_area_um2):.0f} um^2", flush=True)
 
     # ---- HH reference + sampler for anti-forgetting ----
     hh = HHReference()
@@ -229,13 +233,32 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
     start_time = time.time()
     best_loss = float('inf')
 
+    # ---- Device check ----
+    print(f"\nJAX backend: {jax.default_backend()}")
+    print(f"JAX devices: {jax.devices()}")
+    if jax.default_backend() != 'gpu':
+        print("WARNING: Not using GPU! Install jax[cuda12] for CUDA support.")
+
+    # ---- Warmup: trigger JIT compilation ----
+    print(f"\nCompiling Phase 2 train step (one-time cost)...", flush=True)
+    t_compile = time.time()
+
+    key, warmup_key = jax.random.split(key)
+    warmup_result = step_fn(
+        model, latent_gates, conversion,
+        model_opt_state, latent_opt_state, conv_opt_state,
+        warmup_key,
+    )
+    jax.block_until_ready(warmup_result)
+    print(f"Compilation done in {time.time() - t_compile:.1f}s", flush=True)
+
     print(f"\nTraining: {config_p2.n_epochs} epochs")
     print(f"LRs: model={config_p2.model_lr}, latent={config_p2.latent_lr}, "
           f"conv={config_p2.conversion_lr}")
     print(f"Weights: field={config_p2.field_weight}, "
           f"gating={config_p2.gating_consistency_weight}, "
           f"smooth={config_p2.smooth_weight}")
-    print()
+    print(flush=True)
 
     for epoch in range(config_p2.n_epochs):
         key, step_key = jax.random.split(key)
@@ -249,7 +272,8 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
         )
 
         # ---- Logging ----
-        do_log = (epoch % config_p2.log_every == 0)
+        # Always log epoch 0 to confirm training started
+        do_log = (epoch % config_p2.log_every == 0) or epoch == 0
         do_plot = (epoch % config_p2.plot_every == 0) and epoch > 0
         do_ckpt = (epoch % config_p2.checkpoint_every == 0) and epoch > 0
 
@@ -261,14 +285,18 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
 
             if do_log:
                 elapsed = time.time() - start_time
+                dV_mse_str = ""
+                if 'dV_mse_raw' in info_np:
+                    dV_mse_str = f" | dV_MSE: {info_np['dV_mse_raw']:.1f}"
                 print(f"  Epoch {epoch:>5} | "
                       f"Total: {info_np['total_loss']:.6f} | "
-                      f"dV: {info_np['dV_loss']:.6f} | "
-                      f"Gate: {info_np['gate_loss']:.6f} | "
+                      f"dV: {info_np['dV_loss']:.4f} | "
+                      f"Gate: {info_np['gate_loss']:.4f} | "
                       f"Smooth: {info_np['smooth_loss']:.6f} | "
-                      f"Field: {info_np['field_loss']:.6f} | "
-                      f"Area: {info_np['membrane_area_um2']:.0f}um² | "
-                      f"{elapsed:.0f}s")
+                      f"Field: {info_np['field_loss']:.4f} | "
+                      f"Area: {info_np['membrane_area_um2']:.0f}um²"
+                      f"{dV_mse_str} | "
+                      f"{elapsed:.0f}s", flush=True)
 
             if do_plot:
                 I_ext_hh = conversion.convert(I_ext_pA)
