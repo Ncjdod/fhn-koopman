@@ -24,16 +24,15 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
-import diffrax
 import numpy as np
 import h5py
 
-from HH_NeuralODE import create_model, integrate
+from HH_NeuralODE import create_model
 from HodgkinHuxley import HodgkinHuxley
-from physics_loss import LossWeights, make_shooting_train_step
+from physics_loss import LossWeights, PhysicsParams, make_shooting_train_step
 from curriculum import CurriculumScheduler
 from AllenBrainLoader import download_nwb, find_sweeps, get_sweep_data
-from multiple_shooting import compute_segment_boundaries, build_segment_arrays
+from multiple_shooting import compute_segment_boundaries, build_segment_arrays, _heun_scan_integrate
 from visualization import plot_progress, plot_final
 
 
@@ -41,8 +40,8 @@ class Config:
     """All hyperparameters in one place."""
 
     # --- Model ---
-    n_fourier = 32 
-    fourier_sigma = 1.0     
+    n_fourier = 32
+    fourier_sigma = 10.0
     seed = 42
 
     # --- Data ---
@@ -50,12 +49,12 @@ class Config:
     window_pre = 5.0  
     window_post = 50.0 
 
-    # --- Unit Conversion ---
+    # --- Unit Conversion (trainable) ---
     # Allen data: pA (picoamperes, absolute current)
     # HH model:   uA/cm2 (current density)
-    # Typical cortical soma: ~2000 um^2 = 2e-5 cm^2
-    membrane_area_cm2 = 2e-5
-    pA_to_uA_per_cm2 = 1e-6 / 2e-5  
+    # Initial estimate: ~2000 um^2 = 2e-5 cm^2 (typical cortical soma)
+    # The actual membrane area is learned via physics loss gradient
+    membrane_area_cm2_init = 2e-5
 
     # --- Curriculum ---
     T_start = 5.0 
@@ -63,26 +62,28 @@ class Config:
     n_stages = 10
     epochs_per_stage = 300
     schedule = 'linear'
-    physics_weight_start = 10.0
+    physics_weight_start = 0.0
     physics_weight_end = 1.0
 
     # --- Multiple Shooting ---
-    n_segments_start = 2 
-    n_segments_end = 8 
-    n_pts_per_seg = 20
+    n_segments_start = 10
+    n_segments_end = 30
+    n_pts_per_seg = 5
     continuity_weight_start = 0.1
     continuity_weight_end = 10.0 
 
     # --- Training ---
     model_lr = 1e-3
-    weights_lr = 1e-2 
+    physics_lr = 1e-3
+    weights_lr = 1e-2
     grad_clip_norm = 1.0 
-    log_weight_clamp = 5.0
+    log_weight_clamp = 3.0
     n_colloc = 64 
     n_loss_weights = 8 
-    log_every = 1 
-    plot_every = 500 
-    checkpoint_every = 500 
+    log_every = 10
+    val_every = 50
+    plot_every = 500
+    checkpoint_every = 500
     checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
     val_split = 0.8   
 
@@ -91,40 +92,11 @@ class Config:
     rtol = 1e-3
     atol = 1e-5
 
-    # --- Adjoint Method ---
-    adjoint_method = "recursive_checkpoint"
-    adjoint_max_steps = None
-    adjoint_rtol = None
-    adjoint_atol = None
+    # (Integration is handled by custom Heun scan integrator in multiple_shooting.py)
 
     @property
     def total_epochs(self):
         return self.n_stages * self.epochs_per_stage
-
-
-def make_adjoint(config):
-    """Create a diffrax adjoint method from configuration."""
-    if config.adjoint_method == "backsolve":
-        kwargs = {}
-        if config.adjoint_max_steps is not None:
-            kwargs['max_steps'] = config.adjoint_max_steps
-        if config.adjoint_rtol is not None or config.adjoint_atol is not None:
-            rtol = config.adjoint_rtol if config.adjoint_rtol is not None else config.rtol
-            atol = config.adjoint_atol if config.adjoint_atol is not None else config.atol
-            kwargs['stepsize_controller'] = diffrax.PIDController(rtol=rtol, atol=atol)
-        return diffrax.BacksolveAdjoint(**kwargs)
-
-    elif config.adjoint_method == "recursive_checkpoint":
-        return diffrax.RecursiveCheckpointAdjoint()
-
-    elif config.adjoint_method == "direct":
-        return diffrax.DirectAdjoint()
-
-    else:
-        raise ValueError(
-            f"Unknown adjoint method: {config.adjoint_method}. "
-            f"Choose from: 'backsolve', 'recursive_checkpoint', 'direct'"
-        )
 
 
 def load_allen_data(config):
@@ -231,9 +203,13 @@ def train(config=None):
     t_full, v_full, c_full = t_all[:n_train], v_all[:n_train], c_all[:n_train]
     t_val, v_val, c_val = t_all[n_train:], v_all[n_train:], c_all[n_train:]
     I_ext_fn_full = make_I_ext_fn(t_full, c_full)
-    I_ext_fn_val = make_I_ext_fn(t_val, c_val)
     print(f"Train: {len(t_full)} pts ({float(t_full[-1]):.1f}ms), "
           f"Val: {len(t_val)} pts ({float(t_val[-1] - t_val[0]):.1f}ms)")
+
+    # JIT-compiled validation function using custom Heun integrator
+    @eqx.filter_jit
+    def val_fn(model, y0):
+        return _heun_scan_integrate(model, y0, t_val, c_val, n_substeps=1)
 
     # ---- 2. Create Model ----
     print("\n--- Creating Model ---")
@@ -255,6 +231,12 @@ def train(config=None):
     )
     print(f"Adversarial weights: {config.n_colloc} terms")
 
+    # ---- 3b. Trainable Physics Parameters ----
+    physics_params = PhysicsParams(
+        membrane_area_cm2=config.membrane_area_cm2_init
+    )
+    print(f"Trainable membrane area: {float(physics_params.membrane_area_um2):.0f} um2 (initial)")
+
     # ---- 4. Physics Model ----
     hh = HodgkinHuxley()
 
@@ -268,12 +250,19 @@ def train(config=None):
         optax.clip_by_global_norm(config.grad_clip_norm),
         optax.adam(model_lr_schedule)
     )
+    physics_optimizer = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.adam(config.physics_lr)
+    )
     weights_optimizer = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
         optax.adam(config.weights_lr)
     )
 
     model_opt_state = model_optimizer.init(eqx.filter(model, eqx.is_array))
+    physics_opt_state = physics_optimizer.init(
+        eqx.filter(physics_params, eqx.is_array)
+    )
     weight_opt_state = weights_optimizer.init(
         eqx.filter(loss_weights, eqx.is_array)
     )
@@ -297,11 +286,7 @@ def train(config=None):
     print("\n--- Curriculum Schedule ---")
     scheduler.summary()
 
-    # ---- 7. Adjoint Method ----
-    adjoint = make_adjoint(config)
-    print(f"\nAdjoint method: {config.adjoint_method}")
-
-    # ---- 8. Training Loop ----
+    # ---- 7. Training Loop ----
     print(f"\n--- Training ({config.total_epochs} epochs, multiple shooting) ---")
     loss_history = []
     start_time = time.time()
@@ -336,79 +321,92 @@ def train(config=None):
                 t_sub, v_sub, c_sub, boundaries, n_pts, hh
             )
 
+            # Fixed collocation indices for this stage (static grid)
+            key, colloc_key = jax.random.split(key)
+            n_total_pts = n_seg * n_pts
+            colloc_indices = jax.random.choice(
+                colloc_key, n_total_pts,
+                shape=(config.n_colloc,), replace=True
+            )
+
             train_step_fn = make_shooting_train_step(
-                model_optimizer, weights_optimizer,
+                model_optimizer, physics_optimizer, weights_optimizer,
                 hh, all_ics, t_segments, V_segments,
-                c_segments, adjoint=adjoint
+                c_segments, colloc_indices,
             )
 
         if t_segments is None or len(t_sub) < 10:
             continue
 
-        key, ckey1, ckey2 = jax.random.split(key, 3)
-        n_colloc = config.n_colloc
-        indices = jax.random.randint(ckey1, (n_colloc,), 0, len(t_sub))
-        V_colloc = v_sub[indices] + jax.random.normal(ckey2, (n_colloc,)) * 5.0
-        t_colloc = t_sub[indices]
-        I_colloc_pA = c_sub[indices]
-        I_colloc_hh = I_colloc_pA * config.pA_to_uA_per_cm2
-
-        model, loss_weights, model_opt_state, weight_opt_state, info = \
+        # Convert to JAX arrays so eqx.filter_jit treats them as dynamic
+        # (Python floats are treated as static → recompilation every epoch)
+        (model, physics_params, loss_weights,
+         model_opt_state, physics_opt_state, weight_opt_state, info) = \
             train_step_fn(
-                model, loss_weights,
-                model_opt_state, weight_opt_state,
-                V_colloc, t_colloc, I_colloc_pA, I_colloc_hh,
-                phys_w, cont_w,
+                model, physics_params, loss_weights,
+                model_opt_state, physics_opt_state, weight_opt_state,
+                jnp.array(phys_w), jnp.array(cont_w),
             )
 
-        info_np = {k: float(v) for k, v in info.items()}
-        info_np['epoch'] = epoch
-        info_np['stage'] = stage_num
-        info_np['T'] = T_curr
-        info_np['n_segments'] = n_seg
-        info_np['continuity_weight'] = cont_w
+        # Only materialize values when we need to log (avoids GPU sync every epoch)
+        do_log = (epoch % config.log_every == 0)
+        do_val = (epoch % config.val_every == 0) and len(t_val) >= 10
+        do_checkpoint = (epoch % config.checkpoint_every == 0) and epoch > 0
+        do_plot = (epoch % config.plot_every == 0) and epoch > 0
 
-        if epoch % config.log_every == 0 and len(t_val) >= 10:
-            y0_val = hh.resting_state(v_val[0])
-            y_pred_val = integrate(model, y0_val, t_val, I_ext_fn_val)
-            val_loss = float(jnp.mean((y_pred_val[:, 0] - v_val) ** 2))
-            info_np['val_loss'] = val_loss
+        if do_log or do_val or do_checkpoint:
+            info_np = {k: float(v) for k, v in info.items()}
+            info_np['epoch'] = epoch
+            info_np['stage'] = stage_num
+            info_np['T'] = T_curr
+            info_np['n_segments'] = n_seg
+            info_np['continuity_weight'] = cont_w
 
-        loss_history.append(info_np)
+            if do_val:
+                y0_val = hh.resting_state(v_val[0])
+                y_pred_val = val_fn(model, y0_val)
+                val_loss = float(jnp.mean((y_pred_val[:, 0] - v_val) ** 2))
+                info_np['val_loss'] = val_loss
 
-        if epoch % config.log_every == 0:
-            elapsed = time.time() - start_time
-            val_str = ""
-            if 'val_loss' in info_np:
-                val_str = f" | Val: {info_np['val_loss']:>10.4f}"
-            print(f"  Epoch {epoch:>5} | "
-                  f"Total: {info_np['total_loss']:>10.4f} | "
-                  f"Data: {info_np['data_loss']:>10.4f} | "
-                  f"Cont: {info_np['continuity_loss']:>10.6f} | "
-                  f"Phys: {info_np['physics_loss']:>10.2f} | "
-                  f"Segs: {n_seg} | "
-                  f"T={T_curr:.1f}ms{val_str} | "
-                  f"{elapsed:.0f}s")
+            loss_history.append(info_np)
 
-        if epoch % config.plot_every == 0 and epoch > 0:
-            plot_progress(model, hh, t_full, v_full, c_full, I_ext_fn_full,
-                         epoch, info_np, loss_history, n_segments=n_seg)
+            if do_log:
+                elapsed = time.time() - start_time
+                val_str = ""
+                if 'val_loss' in info_np:
+                    val_str = f" | Val: {info_np['val_loss']:>10.4f}"
+                area_str = ""
+                if 'membrane_area_um2' in info_np:
+                    area_str = f" | Area: {info_np['membrane_area_um2']:>7.0f}um2"
+                print(f"  Epoch {epoch:>5} | "
+                      f"Total: {info_np['total_loss']:>10.4f} | "
+                      f"Data: {info_np['data_loss']:>10.4f} | "
+                      f"Cont: {info_np['continuity_loss']:>10.6f} | "
+                      f"Phys: {info_np['physics_loss']:>10.2f} | "
+                      f"Segs: {n_seg} | "
+                      f"T={T_curr:.1f}ms{val_str}{area_str} | "
+                      f"{elapsed:.0f}s")
 
-        if epoch % config.checkpoint_every == 0 and epoch > 0:
-            ckpt_path = os.path.join(config.checkpoint_dir, f"model_epoch_{epoch:05d}.eqx")
-            eqx.tree_serialise_leaves(ckpt_path, model)
+            if do_plot:
+                plot_progress(model, hh, t_full, v_full, c_full, I_ext_fn_full,
+                             epoch, info_np, loss_history, n_segments=n_seg)
 
-        if info_np['data_loss'] < best_data_loss:
-            best_data_loss = info_np['data_loss']
-            eqx.tree_serialise_leaves(
-                os.path.join(config.checkpoint_dir, "best_model.eqx"), model
-            )
+            if do_checkpoint:
+                ckpt_path = os.path.join(config.checkpoint_dir, f"model_epoch_{epoch:05d}.eqx")
+                eqx.tree_serialise_leaves(ckpt_path, model)
+                if info_np['data_loss'] < best_data_loss:
+                    best_data_loss = info_np['data_loss']
+                    eqx.tree_serialise_leaves(
+                        os.path.join(config.checkpoint_dir, "best_model.eqx"), model
+                    )
 
     elapsed_total = time.time() - start_time
     print(f"\n--- Training Complete ({elapsed_total:.0f}s) ---")
     print(f"Final data loss:       {loss_history[-1]['data_loss']:.6f}")
     print(f"Final continuity loss: {loss_history[-1]['continuity_loss']:.6f}")
     print(f"Final physics loss:    {loss_history[-1]['physics_loss']:.4f}")
+    print(f"Learned membrane area: {float(physics_params.membrane_area_um2):.0f} um2 "
+          f"(init: {config.membrane_area_cm2_init * 1e8:.0f} um2)")
 
     plot_final(model, hh, t_full, v_full, c_full, I_ext_fn_full, loss_history)
 

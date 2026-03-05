@@ -9,14 +9,14 @@ Key design:
   - Fixed n_pts_per_seg for uniform array shapes (vmap requirement)
   - 4D state: [V, m, h, n] — gating variables from HH steady-state at data V
   - Dual current units: model sees pA, HH physics sees uA/cm2
+  - Custom Heun integrator via jax.lax.scan — no diffrax overhead,
+    exact step count, zero max_steps padding in backward pass
 
 Loss functions and optimization are in physics_loss.py.
 """
 
 import jax
 import jax.numpy as jnp
-
-from HH_NeuralODE import integrate
 
 
 def compute_segment_boundaries(t_data, n_segments):
@@ -82,34 +82,89 @@ def build_segment_arrays(t_data, V_data, c_data, boundaries, n_pts_per_seg, hh):
     return t_segments, V_segments, c_segments, all_ics
 
 
+def _heun_scan_integrate(model, y0, t_save, c_save, n_substeps):
+    """
+    Heun (2nd-order RK) integrator via jax.lax.scan.
+
+    No diffrax overhead. Exact step count (n_save_pts - 1) * n_substeps.
+    Zero padding in backward pass.
+
+    Takes n_substeps Heun steps between each consecutive pair of save
+    times. Current is linearly interpolated from the save-time arrays.
+
+    Args:
+        model:      HHNeuralODE — called as model(t, y, I_ext)
+        y0:         (4,) initial state
+        t_save:     (P,) save times (evenly spaced)
+        c_save:     (P,) current at save times (pA)
+        n_substeps: Number of Heun steps between each pair of save times
+
+    Returns:
+        ys: (P, 4) trajectory at save times (includes y0 at t_save[0])
+    """
+    n_intervals = t_save.shape[0] - 1
+
+    def interval_step(y, interval_data):
+        """Integrate from t_save[i] to t_save[i+1] with n_substeps Heun steps."""
+        t_start, t_end, c_start, c_end = interval_data
+        dt = (t_end - t_start) / n_substeps
+        sub_ts = jnp.linspace(t_start, t_end, n_substeps + 1)
+        sub_cs = jnp.linspace(c_start, c_end, n_substeps + 1)
+
+        def heun_step(y, i):
+            t_i = sub_ts[i]
+            c_i = sub_cs[i]
+            t_next = sub_ts[i + 1]
+            c_next = sub_cs[i + 1]
+
+            k1 = model(t_i, y, c_i)
+            y_euler = y + dt * k1
+            k2 = model(t_next, y_euler, c_next)
+            y_new = y + 0.5 * dt * (k1 + k2)
+            # Safety clamp: prevent NaN propagation from extreme derivatives
+            V = jnp.clip(y_new[0], -200.0, 200.0)
+            gates = jnp.clip(y_new[1:], -0.5, 1.5)
+            y_new = jnp.concatenate([V[None], gates])
+            return y_new, None
+
+        y_end, _ = jax.lax.scan(heun_step, y, jnp.arange(n_substeps))
+        return y_end, y_end
+
+    interval_data = (
+        t_save[:-1],     # t_start: (n_intervals,)
+        t_save[1:],      # t_end:   (n_intervals,)
+        c_save[:-1],     # c_start: (n_intervals,)
+        c_save[1:],      # c_end:   (n_intervals,)
+    )
+
+    _, ys_after = jax.lax.scan(interval_step, y0, interval_data)
+    # Prepend initial state
+    ys = jnp.concatenate([y0[None, :], ys_after], axis=0)  # (P, 4)
+    return ys
+
+
 def integrate_all_segments(model, all_ics, t_segments, c_segments,
-                           dt0=0.01, rtol=1e-3, atol=1e-5, max_steps=4096,
-                           adjoint=None):
+                           n_substeps=1, **_ignored):
     """
     Integrate all K segments in parallel using jax.vmap.
 
-    Each segment uses the shared model but independent IC and time span.
-    External current is interpolated from the segment data arrays.
+    Uses a custom Heun integrator with jax.lax.scan. Each save-time
+    interval gets n_substeps Heun steps, giving a total of
+    (n_pts_per_seg - 1) * n_substeps steps per segment. Step count is
+    exact — no max_steps padding, no diffrax overhead.
 
     Args:
         model:       HHNeuralODE (shared across segments)
-        all_ics:     (K, 4) initial conditions [V, m, h, n] from data
+        all_ics:     (K, 4) initial conditions
         t_segments:  (K, n_pts_per_seg) time arrays
-        c_segments:  (K, n_pts_per_seg) current arrays in pA
-        dt0:         Initial step size
-        rtol, atol:  Tolerances
-        max_steps:   Max ODE solver steps per segment
-        adjoint:     Diffrax adjoint method (None = RecursiveCheckpointAdjoint).
-                     Static PyTree, safe to capture in vmap closure.
+        c_segments:  (K, n_pts_per_seg) current arrays (pA)
+        n_substeps:  Heun steps between each pair of save times (default 4)
 
     Returns:
         all_trajectories: (K, n_pts_per_seg, 4) predicted trajectories
     """
     def _single_segment(y0, t_span, c_span):
-        I_ext_fn = lambda t: jnp.interp(t, t_span, c_span)
-        return integrate(model, y0, t_span, I_ext_fn,
-                         dt0=dt0, rtol=rtol, atol=atol, max_steps=max_steps,
-                         adjoint=adjoint)
+        return _heun_scan_integrate(model, y0, t_span, c_span, n_substeps)
 
     return jax.vmap(_single_segment)(all_ics, t_segments, c_segments)
 

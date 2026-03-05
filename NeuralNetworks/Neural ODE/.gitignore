@@ -56,3 +56,4 @@ figures/
 *.nwb
 *.eqx
 *.pyc
+*.pkl

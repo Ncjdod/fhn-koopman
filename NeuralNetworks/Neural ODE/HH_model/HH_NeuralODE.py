@@ -138,13 +138,17 @@ class HHNeuralODE(eqx.Module):
 
         out = self.mlp(x)
 
-        dVdt = out[0:1]    
-        out_gates = out[1:4] 
-        y_gates = y[1:4]      
+        # Clip derivatives to physiologically realistic bounds.
+        # Prevents integration divergence AND bounds backward-pass Jacobian
+        # (76 Heun steps = RNN-like gradient explosion without this).
+        dVdt = jnp.clip(out[0:1], -500.0, 500.0)
+        out_gates = out[1:4]
+        y_gates = y[1:4]
 
-        dgates_dt = jnp.where(out_gates > 0, 
-                      out_gates * (1.0 - y_gates), 
+        dgates_dt = jnp.where(out_gates > 0,
+                      out_gates * (1.0 - y_gates),
                       out_gates * y_gates)
+        dgates_dt = jnp.clip(dgates_dt, -25.0, 25.0)
 
         return jnp.concatenate([dVdt, dgates_dt])
 
@@ -177,7 +181,7 @@ def make_diffrax_term(I_ext_fn):
 
 
 def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
-              rtol=1e-3, atol=1e-5, max_steps=16384, adjoint=None):
+              rtol=1e-3, atol=1e-5, max_steps=4096, adjoint=None):
     """
     Integrate the Neural ODE forward in time.
 
