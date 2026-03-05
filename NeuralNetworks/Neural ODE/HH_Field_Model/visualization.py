@@ -127,7 +127,7 @@ def plot_phase_portrait(model, hh, I_ext_val=10.0, n_grid=25,
 
 
 def plot_training_curves(loss_history, save_dir="HH_Field_Model"):
-    """Plot Phase 1 training loss curves."""
+    """Plot Phase 1 training loss curves with validation and integration metrics."""
     os.makedirs(save_dir, exist_ok=True)
 
     epochs = [h['epoch'] for h in loss_history]
@@ -137,19 +137,30 @@ def plot_training_curves(loss_history, save_dir="HH_Field_Model"):
     mse_dh = [h['mse_dh'] for h in loss_history]
     mse_dn = [h['mse_dn'] for h in loss_history]
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    has_val = any('val_field_loss' in h for h in loss_history)
+    has_int = any('int_v_mse' in h for h in loss_history)
+    n_plots = 2 + (1 if has_val else 0) + (1 if has_int else 0)
 
-    # Normalized loss
-    ax = axes[0]
-    ax.semilogy(epochs, total, 'k-', lw=2, label='Normalized Field Loss')
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 5))
+    if n_plots == 1:
+        axes = [axes]
+    ax_idx = 0
+
+    # Train + val normalized loss
+    ax = axes[ax_idx]; ax_idx += 1
+    ax.semilogy(epochs, total, 'k-', lw=2, label='Train')
+    if has_val:
+        val_epochs = [h['epoch'] for h in loss_history if 'val_field_loss' in h]
+        val_loss = [h['val_field_loss'] for h in loss_history if 'val_field_loss' in h]
+        ax.semilogy(val_epochs, val_loss, 'ro-', markersize=4, lw=1.5, label='Validation')
     ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
+    ax.set_ylabel('Normalized Field Loss')
     ax.set_title('Phase 1: Field Distillation')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     # Per-component raw MSE
-    ax = axes[1]
+    ax = axes[ax_idx]; ax_idx += 1
     ax.semilogy(epochs, mse_dV, 'b-', label='dV/dt', alpha=0.8)
     ax.semilogy(epochs, mse_dm, 'r-', label='dm/dt', alpha=0.8)
     ax.semilogy(epochs, mse_dh, 'g-', label='dh/dt', alpha=0.8)
@@ -159,6 +170,23 @@ def plot_training_curves(loss_history, save_dir="HH_Field_Model"):
     ax.set_title('Per-Component MSE')
     ax.legend()
     ax.grid(True, alpha=0.3)
+
+    # Integration validation
+    if has_int:
+        ax = axes[ax_idx]; ax_idx += 1
+        int_epochs = [h['epoch'] for h in loss_history if 'int_v_mse' in h]
+        int_mse = [h['int_v_mse'] for h in loss_history if 'int_v_mse' in h]
+        int_max = [h['int_v_max_err'] for h in loss_history if 'int_v_max_err' in h]
+        ax.plot(int_epochs, int_mse, 'b-o', markersize=4, lw=1.5, label='V MSE (mV²)')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Integration V MSE (mV²)')
+        ax.set_title('Integration Test')
+        ax2 = ax.twinx()
+        ax2.plot(int_epochs, int_max, 'r--s', markersize=4, lw=1.5, label='V max err (mV)')
+        ax2.set_ylabel('Max |V error| (mV)', color='r')
+        ax.legend(loc='upper left')
+        ax2.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'phase1_training_curves.png'), dpi=120)

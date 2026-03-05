@@ -29,6 +29,94 @@ from visualization import (plot_derivative_scatter, plot_phase_portrait,
                            plot_training_curves, plot_integration_test)
 
 
+# ================================================================
+# Validation: fixed field set + integration trajectory
+# ================================================================
+
+def make_val_field_fn():
+    """JIT-compiled field loss on a fixed validation set (no gradients)."""
+    @eqx.filter_jit
+    def val_field(model, val_states, val_I, val_dydt):
+        _, info = field_loss(model, val_states, val_I, val_dydt)
+        return info
+    return val_field
+
+
+def _make_integration_mse_fn():
+    """
+    Create a JIT-compiled integration test via jax.lax.scan.
+
+    Much faster than a Python for-loop (~100x speedup).
+    """
+    @eqx.filter_jit
+    def _integration_mse(model, hh_y0, I_ext_val, n_steps, dt):
+        # Euler via lax.scan: HH ground truth
+        def hh_step(y, _):
+            I_Na = 120.0 * (y[1]**3) * y[2] * (y[0] - 50.0)
+            I_K = 36.0 * (y[3]**4) * (y[0] - (-77.0))
+            I_L = 0.3 * (y[0] - (-54.4))
+            dV = (I_ext_val - I_Na - I_K - I_L) / 1.0
+
+            # alpha/beta with safe division
+            dv_m = y[0] + 40.0
+            safe_m = jnp.where(jnp.abs(dv_m) < 1e-6, 1.0, dv_m)
+            a_m = jnp.where(jnp.abs(dv_m) < 1e-6, 1.0,
+                            0.1 * safe_m / (1.0 - jnp.exp(-safe_m / 10.0)))
+            b_m = 4.0 * jnp.exp(-(y[0] + 65.0) / 18.0)
+
+            a_h = 0.07 * jnp.exp(-(y[0] + 65.0) / 20.0)
+            b_h = 1.0 / (1.0 + jnp.exp(-(y[0] + 35.0) / 10.0))
+
+            dv_n = y[0] + 55.0
+            safe_n = jnp.where(jnp.abs(dv_n) < 1e-6, 1.0, dv_n)
+            a_n = jnp.where(jnp.abs(dv_n) < 1e-6, 0.1,
+                            0.01 * safe_n / (1.0 - jnp.exp(-safe_n / 10.0)))
+            b_n = 0.125 * jnp.exp(-(y[0] + 65.0) / 80.0)
+
+            dm = a_m * (1.0 - y[1]) - b_m * y[1]
+            dh = a_h * (1.0 - y[2]) - b_h * y[2]
+            dn = a_n * (1.0 - y[3]) - b_n * y[3]
+
+            dy = jnp.array([dV, dm, dh, dn])
+            y_new = y + dt * dy
+            return y_new, y_new[0]
+
+        _, V_hh = jax.lax.scan(hh_step, hh_y0, None, length=n_steps)
+
+        # Euler via lax.scan: NN prediction
+        def nn_step(y, _):
+            dy = model(y[0], y[1], y[2], y[3], I_ext_val)
+            y_new = y + dt * dy
+            return y_new, y_new[0]
+
+        _, V_nn = jax.lax.scan(nn_step, hh_y0, None, length=n_steps)
+
+        v_mse = jnp.mean((V_hh - V_nn) ** 2)
+        v_max_err = jnp.max(jnp.abs(V_hh - V_nn))
+
+        return v_mse, v_max_err
+
+    return _integration_mse
+
+
+def integration_mse(model, hh, I_ext_val=10.0, T_ms=50.0, dt=0.01,
+                    _cached_fn=[None]):
+    """
+    Forward-integrate learned field vs HH ground truth, return voltage MSE.
+
+    Uses Euler via jax.lax.scan — JIT compiled, ~100x faster than Python loop.
+    """
+    if _cached_fn[0] is None:
+        _cached_fn[0] = _make_integration_mse_fn()
+
+    y0 = hh.resting_state(-65.0)
+    n_steps = int(T_ms / dt)
+
+    v_mse, v_max_err = _cached_fn[0](model, y0, I_ext_val, n_steps, dt)
+
+    return float(v_mse), float(v_max_err)
+
+
 def make_train_step(optimizer):
     """
     Create a JIT-compiled training step.
@@ -130,6 +218,13 @@ def train_phase1(config=None):
     start_time = time.time()
     best_loss = float('inf')
 
+    # ---- Fixed validation set (sampled once, reused every val_every) ----
+    key, val_key = jax.random.split(key)
+    val_states, val_I = sampler.mixed_sample(val_key, config.batch_size)
+    val_dydt = hh.derivatives_batch(val_states, val_I)
+    val_field_fn = make_val_field_fn()
+    print(f"Validation set: {config.batch_size} fixed points")
+
     # ---- Device check ----
     print(f"\nJAX backend: {jax.default_backend()}")
     print(f"JAX devices: {jax.devices()}")
@@ -184,15 +279,32 @@ def train_phase1(config=None):
             info_np['lr'] = float(lr_schedule(epoch))
             loss_history.append(info_np)
 
+            # Compute validation losses when needed
+            if do_val:
+                val_info = val_field_fn(model, val_states, val_I, val_dydt)
+                info_np['val_field_loss'] = float(val_info['field_loss'])
+                info_np['val_mse_dV'] = float(val_info['mse_dV'])
+                info_np['val_mse_dm'] = float(val_info['mse_dm'])
+
+                v_mse, v_max = integration_mse(model, hh, I_ext_val=10.0, T_ms=50.0)
+                info_np['int_v_mse'] = v_mse
+                info_np['int_v_max_err'] = v_max
+
             if do_log:
                 elapsed = time.time() - start_time
+                val_str = ""
+                if 'val_field_loss' in info_np:
+                    val_str = (f" | Val: {info_np['val_field_loss']:.6f}"
+                               f" | IntMSE: {info_np['int_v_mse']:.2f}"
+                               f" | IntMax: {info_np['int_v_max_err']:.1f}mV")
                 print(f"  Epoch {epoch:>5} | "
                       f"Loss: {info_np['field_loss']:.6f} | "
                       f"MSE dV: {info_np['mse_dV']:.4f} | "
                       f"MSE dm: {info_np['mse_dm']:.6f} | "
                       f"MSE dh: {info_np['mse_dh']:.6f} | "
                       f"MSE dn: {info_np['mse_dn']:.6f} | "
-                      f"LR: {info_np['lr']:.2e} | "
+                      f"LR: {info_np['lr']:.2e}"
+                      f"{val_str} | "
                       f"{elapsed:.0f}s", flush=True)
 
             if do_plot:
@@ -225,11 +337,17 @@ def train_phase1(config=None):
                     best_path = os.path.join(config.checkpoint_dir, "phase1_best.eqx")
                     eqx.tree_serialise_leaves(best_path, model)
 
-    # ---- Final ----
+    # ---- Final validation ----
+    val_info_final = val_field_fn(model, val_states, val_I, val_dydt)
+    v_mse_final, v_max_final = integration_mse(model, hh, I_ext_val=10.0, T_ms=50.0)
+
     elapsed_total = time.time() - start_time
     print(f"\n--- Phase 1 Complete ({elapsed_total:.0f}s) ---")
-    print(f"Final field loss: {loss_history[-1]['field_loss']:.6f}")
-    print(f"Best field loss:  {best_loss:.6f}")
+    print(f"Final train loss:  {loss_history[-1]['field_loss']:.6f}")
+    print(f"Final val loss:    {float(val_info_final['field_loss']):.6f}")
+    print(f"Integration V MSE: {v_mse_final:.2f} mV²")
+    print(f"Integration V max: {v_max_final:.1f} mV")
+    print(f"Best train loss:   {best_loss:.6f}")
 
     # Final plots
     save_dir = os.path.dirname(config.checkpoint_dir)
