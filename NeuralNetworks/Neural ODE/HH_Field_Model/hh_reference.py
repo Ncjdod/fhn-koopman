@@ -125,24 +125,12 @@ class HHReference:
 
         return dVdt, dmdt, dhdt, dndt
 
-    def _derivatives_single(self, state, I_ext):
-        """
-        Single-point derivative for vmap.
-
-        Args:
-            state: (4,) array [V, m, h, n]
-            I_ext: scalar
-
-        Returns:
-            dydt: (4,) array [dV, dm, dh, dn]
-        """
-        V, m, h, n = state[0], state[1], state[2], state[3]
-        dV, dm, dh, dn = self.derivatives(V, m, h, n, I_ext)
-        return jnp.array([dV, dm, dh, dn])
-
     def derivatives_batch(self, states, I_ext):
         """
-        Batch derivative computation via vmap.
+        Batch derivative computation via native broadcasting (no vmap).
+
+        All HH equations use jnp ops that broadcast naturally over the
+        batch dimension, so no vmap is needed.
 
         Args:
             states: (N, 4) — each row is [V, m, h, n]
@@ -151,7 +139,13 @@ class HHReference:
         Returns:
             dydt: (N, 4)
         """
-        return jax.vmap(self._derivatives_single)(states, I_ext)
+        V = states[:, 0]
+        m = states[:, 1]
+        h = states[:, 2]
+        n = states[:, 3]
+
+        dV, dm, dh, dn = self.derivatives(V, m, h, n, I_ext)
+        return jnp.stack([dV, dm, dh, dn], axis=-1)  # (N, 4)
 
     # ================================================================
     # Utility

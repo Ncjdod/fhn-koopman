@@ -109,7 +109,10 @@ class VectorFieldNet(eqx.Module):
 
     def predict_batch(self, states, I_ext):
         """
-        Batch prediction via vmap.
+        Batch prediction via native matrix operations (no vmap).
+
+        Uses batch matmul through each MLP layer directly, which XLA
+        compiles efficiently on GPU (unlike vmap which unrolls the graph).
 
         Args:
             states: (N, 4) — each row [V, m, h, n]
@@ -118,9 +121,37 @@ class VectorFieldNet(eqx.Module):
         Returns:
             dydt: (N, 4)
         """
-        def single(state, I):
-            return self(state[0], state[1], state[2], state[3], I)
-        return jax.vmap(single)(states, I_ext)
+        # Batch normalize: (N, 5)
+        V = states[:, 0]
+        m = states[:, 1]
+        h = states[:, 2]
+        n = states[:, 3]
+
+        V_norm = (V - self._v_center) / self._v_scale
+        m_norm = 2.0 * m - 1.0
+        h_norm = 2.0 * h - 1.0
+        n_norm = 2.0 * n - 1.0
+        I_norm = (I_ext - self._i_center) / self._i_scale
+
+        x_norm = jnp.stack([V_norm, m_norm, h_norm, n_norm, I_norm], axis=-1)  # (N, 5)
+
+        # Batch Fourier embedding: (N, 2*n_fourier)
+        B = jax.lax.stop_gradient(self.B)       # (5, n_fourier)
+        proj = 2.0 * jnp.pi * (x_norm @ B)     # (N, n_fourier)
+        x = jnp.concatenate([jnp.sin(proj), jnp.cos(proj)], axis=-1)  # (N, 2*n_fourier)
+
+        # Batch MLP forward: x @ W.T + b for each layer
+        for layer in self.mlp.layers[:-1]:
+            x = jnp.tanh(x @ layer.weight.T + layer.bias)  # (N, hidden_dim)
+        x = x @ self.mlp.layers[-1].weight.T + self.mlp.layers[-1].bias  # (N, 4)
+
+        # Derivative clipping
+        dV = jnp.clip(x[:, 0], -self._dV_clip, self._dV_clip)
+        dm = jnp.clip(x[:, 1], -self._dgate_clip, self._dgate_clip)
+        dh = jnp.clip(x[:, 2], -self._dgate_clip, self._dgate_clip)
+        dn = jnp.clip(x[:, 3], -self._dgate_clip, self._dgate_clip)
+
+        return jnp.stack([dV, dm, dh, dn], axis=-1)  # (N, 4)
 
 
 def create_model(hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0, key=None):
