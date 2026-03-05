@@ -55,3 +55,4 @@ figures/
 *.pdf
 *.nwb
 *.eqx
+*.pyc
