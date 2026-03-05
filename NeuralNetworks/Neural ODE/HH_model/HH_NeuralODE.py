@@ -71,8 +71,7 @@ class HHNeuralODE(eqx.Module):
     where y = [V, m, h, n].
     """
     fourier: FourierFeatures
-    layers: list
-    output_layer: eqx.nn.Linear
+    mlp: eqx.nn.MLP
 
     def __init__(self, n_fourier=32, sigma=1.0, *, key):
         """
@@ -81,25 +80,24 @@ class HHNeuralODE(eqx.Module):
             sigma:     Fourier frequency scale
             key:       JAX PRNG key
         """
-        keys = jax.random.split(key, 6)
+        keys = jax.random.split(key, 2)
 
-        input_dim = 6  # [t, V, m, h, n, I_ext]
-        fourier_out_dim = 2 * n_fourier  # sin + cos
+        input_dim = 6 
+        fourier_out_dim = 2 * n_fourier  
         hidden_dim = 128
 
         # Fixed Fourier features
         self.fourier = FourierFeatures(input_dim, n_fourier, sigma=sigma, key=keys[0])
 
         # 4 hidden layers, 128 neurons each
-        self.layers = [
-            eqx.nn.Linear(fourier_out_dim, hidden_dim, key=keys[1]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[2]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[3]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[4]),
-        ]
-
-        # Output: [dV/dt, dm/dt, dh/dt, dn/dt]
-        self.output_layer = eqx.nn.Linear(hidden_dim, 4, key=keys[5])
+        self.mlp = eqx.nn.MLP(
+        in_size=fourier_out_dim,
+        out_size=4,
+        width_size=128,
+        depth=4,
+        activation=jnp.tanh,
+        key=keys[1]
+        )
 
     @staticmethod
     def normalize_inputs(t, V, m, h, n, I_ext):
@@ -138,29 +136,40 @@ class HHNeuralODE(eqx.Module):
         # Fourier encoding
         x = self.fourier(x)
 
-        # 4-layer MLP with tanh
-        for layer in self.layers:
-            x = jnp.tanh(layer(x))
+        out = self.mlp(x)
 
-        # Output: [dV/dt, dm/dt, dh/dt, dn/dt]
-        return self.output_layer(x)
+        dVdt = out[0:1]    
+        out_gates = out[1:4] 
+        y_gates = y[1:4]      
+
+        dgates_dt = jnp.where(out_gates > 0, 
+                      out_gates * (1.0 - y_gates), 
+                      out_gates * y_gates)
+
+        return jnp.concatenate([dVdt, dgates_dt])
 
 
 # ============================================================
 # ODE Integration (Diffrax)
 # ============================================================
-def make_diffrax_term(model, I_ext_fn):
+def make_diffrax_term(I_ext_fn):
     """
-    Create a diffrax ODETerm from the model.
+    Create a diffrax ODETerm that reads the model from args.
+
+    The model is passed via diffeqsolve's `args` parameter rather than
+    being captured in a closure. This is required for BacksolveAdjoint
+    (continuous adjoint method), which uses a custom VJP rule that can
+    only differentiate with respect to explicit args, not closed-over values.
 
     Args:
-        model:     HHNeuralODE instance
-        I_ext_fn:  Function t -> I_ext (external current at time t)
+        I_ext_fn:  Function t -> I_ext (external current at time t).
+                   This is NOT differentiated, so closure capture is fine.
 
     Returns:
         diffrax.ODETerm
     """
     def vector_field(t, y, args):
+        model = args
         I_ext = I_ext_fn(t)
         return model(t, y, I_ext)
 
@@ -168,7 +177,7 @@ def make_diffrax_term(model, I_ext_fn):
 
 
 def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
-              rtol=1e-3, atol=1e-5):
+              rtol=1e-3, atol=1e-5, max_steps=16384, adjoint=None):
     """
     Integrate the Neural ODE forward in time.
 
@@ -180,6 +189,10 @@ def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
         dt0:       Initial step size
         solver:    Diffrax solver (default: Tsit5)
         rtol, atol: Tolerances for adaptive stepping
+        max_steps: Maximum solver steps (default 16384, use 4096 for segments)
+        adjoint:   Diffrax adjoint method for backpropagation through the solver.
+                   None defaults to RecursiveCheckpointAdjoint (discretise-then-optimise).
+                   Use diffrax.BacksolveAdjoint() for continuous adjoint (memory-efficient).
 
     Returns:
         ys: Trajectory of shape (n_steps, 4)
@@ -187,7 +200,10 @@ def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
     if solver is None:
         solver = diffrax.Tsit5()
 
-    term = make_diffrax_term(model, I_ext_fn)
+    if adjoint is None:
+        adjoint = diffrax.RecursiveCheckpointAdjoint()
+
+    term = make_diffrax_term(I_ext_fn)
 
     saveat = diffrax.SaveAt(ts=t_span)
     stepsize_controller = diffrax.PIDController(rtol=rtol, atol=atol)
@@ -199,9 +215,11 @@ def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
         t1=t_span[-1],
         dt0=dt0,
         y0=y0,
+        args=model,
         saveat=saveat,
         stepsize_controller=stepsize_controller,
-        max_steps=16384,
+        adjoint=adjoint,
+        max_steps=max_steps,
         throw=False,
     )
 
