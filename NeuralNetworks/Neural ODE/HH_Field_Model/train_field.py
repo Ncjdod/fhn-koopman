@@ -36,8 +36,8 @@ from visualization import (plot_derivative_scatter, plot_phase_portrait,
 def make_val_field_fn():
     """JIT-compiled field loss on a fixed validation set (no gradients)."""
     @eqx.filter_jit
-    def val_field(model, val_states, val_I, val_dydt):
-        _, info = field_loss(model, val_states, val_I, val_dydt)
+    def val_field(model, val_states, val_I, val_dydt, sigma):
+        _, info = field_loss(model, val_states, val_I, val_dydt, sigma)
         return info
     return val_field
 
@@ -129,9 +129,9 @@ def make_train_step(optimizer):
         step_fn(model, opt_state, states, I_ext, dydt_true) -> (model, opt_state, loss, info)
     """
     @eqx.filter_jit
-    def step(model, opt_state, states, I_ext, dydt_true):
+    def step(model, opt_state, states, I_ext, dydt_true, sigma):
         (loss, info), grads = eqx.filter_value_and_grad(field_loss, has_aux=True)(
-            model, states, I_ext, dydt_true
+            model, states, I_ext, dydt_true, sigma
         )
 
         # Clean NaN/inf gradients
@@ -189,13 +189,33 @@ def train_phase1(config=None):
         gate_std=config.gate_std,
     )
 
+    # ---- Global sigma: frozen normalization from large sample ----
+    # sigma[0] is computed on log-transformed dV (matching field_loss transform)
+    from losses import _log_transform
+    key, sigma_key = jax.random.split(key)
+    sigma_states, sigma_I = sampler.mixed_sample(sigma_key, 50_000, config.physiological_fraction)
+    sigma_dydt = hh.derivatives_batch(sigma_states, sigma_I)
+    dV_log_sigma = jnp.std(_log_transform(sigma_dydt[:, 0]))
+    global_sigma = jnp.array([
+        dV_log_sigma,
+        jnp.std(sigma_dydt[:, 1]),
+        jnp.std(sigma_dydt[:, 2]),
+        jnp.std(sigma_dydt[:, 3]),
+    ])
+    global_sigma = jnp.maximum(global_sigma, 1e-6)
+    print(f"Global sigma (log_dV, dm, dh, dn): "
+          f"{float(global_sigma[0]):.4f}, {float(global_sigma[1]):.4f}, "
+          f"{float(global_sigma[2]):.4f}, {float(global_sigma[3]):.4f}")
+
     # ---- Model ----
     key, model_key = jax.random.split(key)
     model = create_model(
         hidden_dim=config.hidden_dim,
         n_layers=config.n_layers,
-        n_fourier=getattr(config, 'n_fourier', 64),
-        sigma=getattr(config, 'fourier_sigma', 1.0),
+        n_fourier=getattr(config, 'n_fourier', 128),
+        sigma=getattr(config, 'fourier_sigma', 10.0),
+        head_dim=getattr(config, 'head_dim', 32),
+        v_head_dim=getattr(config, 'v_head_dim', 64),
         key=model_key,
     )
 
@@ -204,9 +224,11 @@ def train_phase1(config=None):
     print(f"Model parameters: {n_params:,}")
 
     # ---- Optimizer: AdamW with cosine schedule ----
+    inner_steps = getattr(config, 'inner_steps', 1)
+    total_steps = config.n_epochs * inner_steps
     lr_schedule = optax.cosine_decay_schedule(
         init_value=config.lr,
-        decay_steps=config.n_epochs,
+        decay_steps=total_steps,
         alpha=config.lr_min / config.lr,
     )
     optimizer = optax.chain(
@@ -244,7 +266,7 @@ def train_phase1(config=None):
     key, warmup_key = jax.random.split(key)
     warmup_states, warmup_I = sampler.mixed_sample(warmup_key, 64, config.physiological_fraction)
     warmup_dydt = hh.derivatives_batch(warmup_states, warmup_I)
-    _ = step_fn(model, opt_state, warmup_states, warmup_I, warmup_dydt)
+    _ = step_fn(model, opt_state, warmup_states, warmup_I, warmup_dydt, global_sigma)
 
     # Force computation to complete (JAX is lazy)
     jax.block_until_ready(_)
@@ -252,25 +274,30 @@ def train_phase1(config=None):
     print(f"Compilation done in {time.time() - t_compile:.1f}s")
 
     # ---- Training loop ----
-    print(f"\nTraining: {config.n_epochs} epochs, batch_size={config.batch_size}")
+    print(f"\nTraining: {config.n_epochs} epochs × {inner_steps} inner steps "
+          f"= {total_steps} gradient steps, batch_size={config.batch_size}")
     print(f"Sampling: {config.physiological_fraction*100:.0f}% physiological, "
           f"{(1-config.physiological_fraction)*100:.0f}% uniform")
     print(flush=True)
 
+    step_count = 0  # tracks total gradient steps for LR schedule
+
     for epoch in range(config.n_epochs):
-        # Generate fresh batch
+        # Generate fresh batch (reused for inner_steps gradient steps)
         key, sample_key = jax.random.split(key)
         states, I_ext = sampler.mixed_sample(
             sample_key, config.batch_size, config.physiological_fraction
         )
 
-        # Compute ground truth derivatives
+        # Compute ground truth derivatives (once per batch)
         dydt_true = hh.derivatives_batch(states, I_ext)
 
-        # Training step
-        model, opt_state, loss, info = step_fn(
-            model, opt_state, states, I_ext, dydt_true
-        )
+        # Multiple gradient steps on the same batch
+        for _ in range(inner_steps):
+            model, opt_state, loss, info = step_fn(
+                model, opt_state, states, I_ext, dydt_true, global_sigma
+            )
+            step_count += 1
 
         # ---- Logging ----
         # Epoch 0: always log to confirm training started
@@ -282,15 +309,15 @@ def train_phase1(config=None):
         if do_log or do_plot or do_val or do_ckpt:
             info_np = {k: float(v) for k, v in info.items()}
             info_np['epoch'] = epoch
-            info_np['lr'] = float(lr_schedule(epoch))
+            info_np['lr'] = float(lr_schedule(step_count))
             loss_history.append(info_np)
 
             # Compute validation losses when needed
             if do_val:
-                val_info = val_field_fn(model, val_states, val_I, val_dydt)
+                val_info = val_field_fn(model, val_states, val_I, val_dydt, global_sigma)
                 info_np['val_field_loss'] = float(val_info['field_loss'])
-                info_np['val_mse_dV'] = float(val_info['mse_dV'])
-                info_np['val_mse_dm'] = float(val_info['mse_dm'])
+                info_np['val_nmse_dV'] = float(val_info['nmse_dV'])
+                info_np['val_nmse_dm'] = float(val_info['nmse_dm'])
 
                 v_mse, v_max = integration_mse(model, hh, I_ext_val=10.0, T_ms=50.0)
                 info_np['int_v_mse'] = v_mse
@@ -303,12 +330,12 @@ def train_phase1(config=None):
                     val_str = (f" | Val: {info_np['val_field_loss']:.6f}"
                                f" | IntMSE: {info_np['int_v_mse']:.2f}"
                                f" | IntMax: {info_np['int_v_max_err']:.1f}mV")
-                print(f"  Epoch {epoch:>5} | "
+                print(f"  Epoch {epoch:>5} ({step_count:>6} steps) | "
                       f"Loss: {info_np['field_loss']:.6f} | "
-                      f"MSE dV: {info_np['mse_dV']:.4f} | "
-                      f"MSE dm: {info_np['mse_dm']:.6f} | "
-                      f"MSE dh: {info_np['mse_dh']:.6f} | "
-                      f"MSE dn: {info_np['mse_dn']:.6f} | "
+                      f"nMSE dV: {info_np['nmse_dV']:.6f} | "
+                      f"nMSE dm: {info_np['nmse_dm']:.6f} | "
+                      f"nMSE dh: {info_np['nmse_dh']:.6f} | "
+                      f"nMSE dn: {info_np['nmse_dn']:.6f} | "
                       f"LR: {info_np['lr']:.2e}"
                       f"{val_str} | "
                       f"{elapsed:.0f}s", flush=True)
@@ -344,7 +371,7 @@ def train_phase1(config=None):
                     eqx.tree_serialise_leaves(best_path, model)
 
     # ---- Final validation ----
-    val_info_final = val_field_fn(model, val_states, val_I, val_dydt)
+    val_info_final = val_field_fn(model, val_states, val_I, val_dydt, global_sigma)
     v_mse_final, v_max_final = integration_mse(model, hh, I_ext_val=10.0, T_ms=50.0)
 
     elapsed_total = time.time() - start_time

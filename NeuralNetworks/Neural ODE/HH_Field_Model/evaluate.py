@@ -67,6 +67,8 @@ def load_model(checkpoint_path=None, config=None):
         n_layers=config.n_layers,
         n_fourier=getattr(config, 'n_fourier', 64),
         sigma=getattr(config, 'fourier_sigma', 1.0),
+        head_dim=getattr(config, 'head_dim', 32),
+        v_head_dim=getattr(config, 'v_head_dim', 64),
         key=jax.random.PRNGKey(0),
     )
     model = eqx.tree_deserialise_leaves(checkpoint_path, skeleton)
@@ -220,7 +222,7 @@ def test_resting_stability(model, hh, save_dir):
 
     # HH ground truth
     def hh_step(y):
-        return hh._derivatives_single(y, 0.0)
+        return jnp.array(hh.derivatives(y[0], y[1], y[2], y[3], 0.0))
     traj_hh = np.array(euler_integrate(hh_step, y0, n_steps, dt))
 
     t = np.linspace(0, T_ms, n_steps + 1)
@@ -295,7 +297,7 @@ def test_action_potential(model, hh, save_dir):
 
         # HH
         def hh_step(y, I=I_ext):
-            return hh._derivatives_single(y, I)
+            return jnp.array(hh.derivatives(y[0], y[1], y[2], y[3], I))
         traj_hh = np.array(euler_integrate(hh_step, y0, n_steps, dt))
 
         V_nn = traj_nn[:, 0]
@@ -497,7 +499,7 @@ def test_if_curve(model, hh, save_dir):
 
         # HH
         def hh_step(y, I=I_val):
-            return hh._derivatives_single(y, I)
+            return jnp.array(hh.derivatives(y[0], y[1], y[2], y[3], I))
         traj_hh = np.array(euler_integrate(hh_step, y0, n_steps, dt))
         V_hh = traj_hh[:, 0]
         hh_spikes = np.sum(np.diff(np.sign(V_hh - 0.0)) > 0)

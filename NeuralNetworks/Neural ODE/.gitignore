@@ -45,6 +45,12 @@ config/secrets.*
 .DS_Store
 Thumbs.db
 
+# Allen Brain data
+allen_data/
+
+# Diagnostic / debug scripts
+diagnose_*.py
+
 # Logs & outputs
 *.log
 logs/
@@ -55,5 +61,3 @@ figures/
 *.pdf
 *.nwb
 *.eqx
-*.pyc
-*.pkl

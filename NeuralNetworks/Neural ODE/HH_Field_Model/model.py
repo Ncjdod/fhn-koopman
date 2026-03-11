@@ -45,8 +45,20 @@ class VectorFieldNet(eqx.Module):
     b_in: jnp.ndarray       # (hidden_dim,)
     W_hidden: jnp.ndarray   # (n_layers-1, hidden_dim, hidden_dim) — stacked hidden layers
     b_hidden: jnp.ndarray   # (n_layers-1, hidden_dim)
-    W_out: jnp.ndarray      # (4, hidden_dim) — output projection
-    b_out: jnp.ndarray      # (4,)
+
+    # Dedicated V head with physics shortcut
+    # Input = trunk output (hidden_dim) + physics features (4: Na, K, leak, I_ext)
+    _n_physics: int = 4
+    W_v1: jnp.ndarray       # (v_head_dim, hidden_dim + _n_physics)
+    b_v1: jnp.ndarray       # (v_head_dim,)
+    W_v2: jnp.ndarray       # (v_head_dim,)
+    b_v2: jnp.ndarray       # scalar
+
+    # Gate heads (stacked — m, h, n share the same head size)
+    W_gate1: jnp.ndarray    # (3, head_dim, hidden_dim)
+    b_gate1: jnp.ndarray    # (3, head_dim)
+    W_gate2: jnp.ndarray    # (3, head_dim)
+    b_gate2: jnp.ndarray    # (3,)
 
     # Normalization parameters
     _v_center: float = -20.0
@@ -55,25 +67,42 @@ class VectorFieldNet(eqx.Module):
     _i_scale: float = 80.0
 
     # Output safety bounds (prevents Euler integration blowup)
-    _dV_clip: float = 500.0
+    # dV/dt can reach ~18000 mV/ms in extreme state-space corners
+    _dV_clip: float = 20000.0
     _dgate_clip: float = 25.0
 
-    def __init__(self, hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0, *, key):
+    def __init__(self, hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0,
+                 head_dim=32, v_head_dim=64, *, key):
         """
         Args:
             hidden_dim:  Width of hidden layers
             n_layers:    Number of hidden layers
             n_fourier:   Number of Fourier frequency pairs (output = 2*n_fourier)
-            sigma:       Std of random frequency matrix (higher = sharper features)
+            sigma:       Std of random frequency matrix, or tuple of stds for
+                         multi-scale Fourier features (e.g. (1.0, 5.0))
+            head_dim:    Width of gate output heads (m, h, n)
+            v_head_dim:  Width of voltage output head (larger for complex V dynamics)
             key:         JAX PRNG key
         """
         n_hidden = max(n_layers - 1, 0)
-        keys = jax.random.split(key, 3 + n_hidden)
-        key_B, key_in, key_out = keys[0], keys[1], keys[2]
-        hidden_keys = keys[3:]
+        keys = jax.random.split(key, 6 + n_hidden)
+        key_B, key_in = keys[0], keys[1]
+        key_v1, key_v2, key_g1, key_g2 = keys[2], keys[3], keys[4], keys[5]
+        hidden_keys = keys[6:]
 
         # Fixed random Fourier frequency matrix: (5, n_fourier)
-        self.B = jax.random.normal(key_B, (5, n_fourier)) * sigma
+        if isinstance(sigma, (tuple, list)):
+            # Multi-scale: split n_fourier evenly across frequency bands
+            n_bands = len(sigma)
+            per_band = n_fourier // n_bands
+            B_bands = []
+            band_keys = jax.random.split(key_B, n_bands)
+            for i, s in enumerate(sigma):
+                n_this = per_band if i < n_bands - 1 else n_fourier - per_band * (n_bands - 1)
+                B_bands.append(jax.random.normal(band_keys[i], (5, n_this)) * s)
+            self.B = jnp.concatenate(B_bands, axis=1)
+        else:
+            self.B = jax.random.normal(key_B, (5, n_fourier)) * sigma
 
         fourier_dim = 2 * n_fourier  # sin + cos
         init = jax.nn.initializers.lecun_normal()
@@ -92,16 +121,53 @@ class VectorFieldNet(eqx.Module):
             self.W_hidden = jnp.zeros((0, hidden_dim, hidden_dim))
             self.b_hidden = jnp.zeros((0, hidden_dim))
 
-        # Output layer: hidden_dim -> 4
-        self.W_out = init(key_out, (4, hidden_dim))
-        self.b_out = jnp.zeros(4)
+        # Dedicated V head with physics shortcut inputs
+        # Receives trunk output + 4 physics features (Na, K, leak, I_ext)
+        v_input_dim = hidden_dim + self._n_physics
+        self.W_v1 = init(key_v1, (v_head_dim, v_input_dim))
+        self.b_v1 = jnp.zeros(v_head_dim)
+        self.W_v2 = init(key_v2, (1, v_head_dim))[0]  # (v_head_dim,)
+        self.b_v2 = jnp.zeros(())
 
-    def _forward(self, x_fourier):
+        # Gate heads: 3 stacked (m, h, n)
+        gate_keys1 = jax.random.split(key_g1, 3)
+        W_g1_list = [init(gate_keys1[i], (head_dim, hidden_dim)) for i in range(3)]
+        self.W_gate1 = jnp.stack(W_g1_list)           # (3, head_dim, hidden_dim)
+        self.b_gate1 = jnp.zeros((3, head_dim))
+
+        gate_keys2 = jax.random.split(key_g2, 3)
+        W_g2_list = [init(gate_keys2[i], (1, head_dim))[0] for i in range(3)]
+        self.W_gate2 = jnp.stack(W_g2_list)           # (3, head_dim)
+        self.b_gate2 = jnp.zeros(3)
+
+    @staticmethod
+    def _physics_features_single(V, m, h, n, I_ext):
+        """Compute HH ionic current structural terms for a single point."""
+        I_Na_struct = (m ** 3) * h * (V - 50.0)     # Na current structure
+        I_K_struct = (n ** 4) * (V + 77.0)           # K current structure
+        I_L_struct = V + 54.4                         # leak current structure
+        return jnp.array([I_Na_struct, I_K_struct, I_L_struct, I_ext])
+
+    @staticmethod
+    def _physics_features_batch(states, I_ext):
+        """Compute HH ionic current structural terms for a batch."""
+        V, m, h, n = states[:, 0], states[:, 1], states[:, 2], states[:, 3]
+        I_Na_struct = (m ** 3) * h * (V - 50.0)
+        I_K_struct = (n ** 4) * (V + 77.0)
+        I_L_struct = V + 54.4
+        return jnp.stack([I_Na_struct, I_K_struct, I_L_struct, I_ext], axis=-1)
+
+    def _forward(self, x_fourier, physics):
         """
-        Core MLP forward pass using lax.scan. No Python loops.
+        Core MLP forward pass using lax.scan + separate output heads.
 
-        Works for both single-point (D,) and batch (N, D) inputs
-        because matmul and broadcasting handle both shapes identically.
+        The V head receives trunk output concatenated with physics features
+        (ionic current structures), giving it a shortcut to the multiplicative
+        terms it otherwise struggles to learn.
+
+        Gate heads (m, h, n) use trunk output only.
+
+        Works for both single-point (D,) and batch (N, D) inputs.
         """
         # Input layer
         x = jnp.tanh(x_fourier @ self.W_in.T + self.b_in)
@@ -113,10 +179,19 @@ class VectorFieldNet(eqx.Module):
 
         x, _ = jax.lax.scan(scan_body, x, (self.W_hidden, self.b_hidden))
 
-        # Output layer (no activation)
-        raw = x @ self.W_out.T + self.b_out
+        # V head: [trunk_output, physics_features] -> v_head_dim -> 1
+        x_v = jnp.concatenate([x, physics], axis=-1)  # (..., hidden_dim + 4)
+        h_v = jnp.tanh(x_v @ self.W_v1.T + self.b_v1)        # (..., v_head_dim)
+        dV = h_v @ self.W_v2 + self.b_v2                      # (...,)
 
-        # Derivative clipping (broadcasts for both (4,) and (N, 4))
+        # Gate heads (stacked): x -> head_dim -> 1, for m/h/n
+        h_g = jnp.tanh(jnp.einsum('...d,ohd->...oh', x, self.W_gate1) + self.b_gate1)
+        gates = jnp.einsum('...oh,oh->...o', h_g, self.W_gate2) + self.b_gate2  # (..., 3)
+
+        # Concatenate: (..., 1) + (..., 3) -> (..., 4)
+        raw = jnp.concatenate([dV[..., None], gates], axis=-1)
+
+        # Derivative clipping
         clip_vals = jnp.array([self._dV_clip, self._dgate_clip,
                                self._dgate_clip, self._dgate_clip])
         return jnp.clip(raw, -clip_vals, clip_vals)
@@ -141,7 +216,10 @@ class VectorFieldNet(eqx.Module):
         proj = 2.0 * jnp.pi * x_norm @ B
         x_fourier = jnp.concatenate([jnp.sin(proj), jnp.cos(proj)])
 
-        return self._forward(x_fourier)
+        # Physics shortcut for V head
+        physics = self._physics_features_single(V, m, h, n, I_ext)
+
+        return self._forward(x_fourier, physics)
 
     def predict_batch(self, states, I_ext):
         """
@@ -169,19 +247,25 @@ class VectorFieldNet(eqx.Module):
         proj = 2.0 * jnp.pi * (x_norm @ B)
         x_fourier = jnp.concatenate([jnp.sin(proj), jnp.cos(proj)], axis=-1)
 
-        return self._forward(x_fourier)
+        # Physics shortcut for V head
+        physics = self._physics_features_batch(states, I_ext)
+
+        return self._forward(x_fourier, physics)
 
 
-def create_model(hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0, key=None):
+def create_model(hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0,
+                 head_dim=32, v_head_dim=64, key=None):
     """
     Factory function for VectorFieldNet.
 
     Args:
-        hidden_dim: MLP width
-        n_layers:   MLP depth (hidden layers)
-        n_fourier:  Fourier feature pairs (output dim = 2*n_fourier)
-        sigma:      Fourier frequency scale
-        key:        JAX PRNG key (default: PRNGKey(42))
+        hidden_dim:  MLP width
+        n_layers:    MLP depth (hidden layers)
+        n_fourier:   Fourier feature pairs (output dim = 2*n_fourier)
+        sigma:       Fourier frequency scale
+        head_dim:    Gate output head width (m, h, n)
+        v_head_dim:  Voltage output head width (larger for complex V dynamics)
+        key:         JAX PRNG key (default: PRNGKey(42))
 
     Returns:
         VectorFieldNet instance
@@ -193,6 +277,8 @@ def create_model(hidden_dim=256, n_layers=4, n_fourier=64, sigma=1.0, key=None):
         n_layers=n_layers,
         n_fourier=n_fourier,
         sigma=sigma,
+        head_dim=head_dim,
+        v_head_dim=v_head_dim,
         key=key,
     )
 
@@ -239,8 +325,10 @@ if __name__ == "__main__":
     print(f"  b_in:     {model.b_in.shape}")
     print(f"  W_hidden: {model.W_hidden.shape}")
     print(f"  b_hidden: {model.b_hidden.shape}")
-    print(f"  W_out:    {model.W_out.shape}")
-    print(f"  b_out:    {model.b_out.shape}")
+    print(f"  W_v1:     {model.W_v1.shape}")
+    print(f"  W_v2:     {model.W_v2.shape}")
+    print(f"  W_gate1:  {model.W_gate1.shape}")
+    print(f"  W_gate2:  {model.W_gate2.shape}")
 
     # Single point
     V, m, h, n, I_ext = -65.0, 0.05, 0.6, 0.32, 10.0

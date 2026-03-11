@@ -132,10 +132,10 @@ def plot_training_curves(loss_history, save_dir="HH_Field_Model"):
 
     epochs = [h['epoch'] for h in loss_history]
     total = [h['field_loss'] for h in loss_history]
-    mse_dV = [h['mse_dV'] for h in loss_history]
-    mse_dm = [h['mse_dm'] for h in loss_history]
-    mse_dh = [h['mse_dh'] for h in loss_history]
-    mse_dn = [h['mse_dn'] for h in loss_history]
+    nmse_dV = [h['nmse_dV'] for h in loss_history]
+    nmse_dm = [h['nmse_dm'] for h in loss_history]
+    nmse_dh = [h['nmse_dh'] for h in loss_history]
+    nmse_dn = [h['nmse_dn'] for h in loss_history]
 
     has_val = any('val_field_loss' in h for h in loss_history)
     has_int = any('int_v_mse' in h for h in loss_history)
@@ -159,15 +159,15 @@ def plot_training_curves(loss_history, save_dir="HH_Field_Model"):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Per-component raw MSE
+    # Per-component normalized MSE
     ax = axes[ax_idx]; ax_idx += 1
-    ax.semilogy(epochs, mse_dV, 'b-', label='dV/dt', alpha=0.8)
-    ax.semilogy(epochs, mse_dm, 'r-', label='dm/dt', alpha=0.8)
-    ax.semilogy(epochs, mse_dh, 'g-', label='dh/dt', alpha=0.8)
-    ax.semilogy(epochs, mse_dn, 'm-', label='dn/dt', alpha=0.8)
+    ax.semilogy(epochs, nmse_dV, 'b-', label='dV/dt', alpha=0.8)
+    ax.semilogy(epochs, nmse_dm, 'r-', label='dm/dt', alpha=0.8)
+    ax.semilogy(epochs, nmse_dh, 'g-', label='dh/dt', alpha=0.8)
+    ax.semilogy(epochs, nmse_dn, 'm-', label='dn/dt', alpha=0.8)
     ax.set_xlabel('Epoch')
-    ax.set_ylabel('Raw MSE')
-    ax.set_title('Per-Component MSE')
+    ax.set_ylabel('Normalized MSE')
+    ax.set_title('Per-Component nMSE')
     ax.legend()
     ax.grid(True, alpha=0.3)
 

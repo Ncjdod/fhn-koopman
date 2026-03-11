@@ -19,18 +19,21 @@ class Phase1Config:
     hidden_dim = 256
     n_layers = 4          # hidden layers
     activation = "tanh"
-    n_fourier = 64        # Fourier feature pairs (input dim = 2*n_fourier)
-    fourier_sigma = 1.0   # frequency scale (higher = sharper features)
+    n_fourier = 128       # Fourier feature pairs (input dim = 2*n_fourier)
+    fourier_sigma = (1.0, 5.0)  # multi-scale: (low, high) frequency bands
+    head_dim = 32         # gate output head width (m, h, n)
+    v_head_dim = 64       # voltage output head width (larger for complex V dynamics)
 
     # --- Training ---
-    n_epochs = 5000
-    batch_size = 8192     # online-generated each epoch
+    n_epochs = 10000
+    batch_size = 32768    # online-generated, reused for inner_steps
+    inner_steps = 3       # gradient steps per batch (amortize data generation)
     lr = 1e-3
     lr_min = 1e-5         # cosine schedule floor
     weight_decay = 1e-4   # AdamW regularization
 
     # --- Sampling ---
-    physiological_fraction = 0.7   # rest is uniform
+    physiological_fraction = 0.85  # 15% uniform (covers edges without extreme outliers dominating)
     # State-space bounds
     V_range = (-100.0, 60.0)       # mV
     m_range = (0.0, 1.0)

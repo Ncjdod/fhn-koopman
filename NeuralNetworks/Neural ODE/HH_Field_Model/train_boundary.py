@@ -49,8 +49,10 @@ def _load_phase1_model(config_p1):
     skeleton = create_model(
         hidden_dim=config_p1.hidden_dim,
         n_layers=config_p1.n_layers,
-        n_fourier=getattr(config_p1, 'n_fourier', 64),
-        sigma=getattr(config_p1, 'fourier_sigma', 1.0),
+        n_fourier=getattr(config_p1, 'n_fourier', 128),
+        sigma=getattr(config_p1, 'fourier_sigma', 10.0),
+        head_dim=getattr(config_p1, 'head_dim', 32),
+        v_head_dim=getattr(config_p1, 'v_head_dim', 64),
         key=key,
     )
     model = eqx.tree_deserialise_leaves(path, skeleton)
@@ -59,7 +61,7 @@ def _load_phase1_model(config_p1):
 
 
 def make_train_step(model_optimizer, latent_optimizer, conv_optimizer,
-                    hh, sampler,
+                    hh, sampler, sigma,
                     V_obs, I_ext_pA, dVdt_obs, t_ms,
                     field_weight, gating_weight, smooth_weight,
                     field_batch_size):
@@ -83,7 +85,7 @@ def make_train_step(model_optimizer, latent_optimizer, conv_optimizer,
             return total_phase2_loss(
                 model_, latent_, conv_,
                 V_obs, I_ext_pA, dVdt_obs, t_ms,
-                hh, sampler, sampler_key,
+                hh, sampler, sampler_key, sigma,
                 field_weight=field_weight,
                 gating_weight=gating_weight,
                 smooth_weight=smooth_weight,
@@ -199,6 +201,21 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
     hh = HHReference()
     sampler = StateSpaceSampler()
 
+    # ---- Global sigma for field loss normalization ----
+    # sigma[0] is computed on log-transformed dV (matching field_loss transform)
+    from losses import _log_transform
+    sigma_key = jax.random.PRNGKey(999)
+    sigma_states, sigma_I = sampler.mixed_sample(sigma_key, 50_000)
+    sigma_dydt = hh.derivatives_batch(sigma_states, sigma_I)
+    dV_log_sigma = jnp.std(_log_transform(sigma_dydt[:, 0]))
+    global_sigma = jnp.array([
+        dV_log_sigma,
+        jnp.std(sigma_dydt[:, 1]),
+        jnp.std(sigma_dydt[:, 2]),
+        jnp.std(sigma_dydt[:, 3]),
+    ])
+    global_sigma = jnp.maximum(global_sigma, 1e-6)
+
     # ---- Optimizers (separate LRs) ----
     model_optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
@@ -220,7 +237,7 @@ def train_phase2(model=None, config_p1=None, config_p2=None):
     # ---- JIT step ----
     step_fn = make_train_step(
         model_optimizer, latent_optimizer, conv_optimizer,
-        hh, sampler,
+        hh, sampler, global_sigma,
         V_obs, I_ext_pA, dVdt_obs, t_ms,
         field_weight=config_p2.field_weight,
         gating_weight=config_p2.gating_consistency_weight,

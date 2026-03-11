@@ -22,50 +22,59 @@ import equinox as eqx
 # Phase 1: Vector Field Distillation Loss
 # ================================================================
 
-def field_loss(model, states, I_ext, dydt_true):
+def _log_transform(x):
+    """Symmetric log transform: sign(x) * log(1 + |x|). Compresses large values."""
+    return jnp.sign(x) * jnp.log1p(jnp.abs(x))
+
+
+def field_loss(model, states, I_ext, dydt_true, sigma):
     """
-    Variance-normalized MSE between predicted and true derivatives.
+    Variance-normalized MSE with log-scale dV/dt.
 
-    L = mean_over_samples( sum_over_components( ((dy_pred - dy_true) / sigma)^2 ) )
+    dV/dt spans ~[-5000, +17000] mV/ms — a few extreme samples dominate MSE.
+    We apply sign(x)*log(1+|x|) to both predicted and true dV/dt before
+    computing the loss. This compresses the range so the model learns relative
+    accuracy across all scales instead of being dominated by outliers.
 
-    where sigma = std(dy_true) per component, computed on the current batch.
-    This auto-balances the loss across components with very different scales
-    (dV/dt ~ O(100) mV/ms vs dm/dt ~ O(1) /ms).
+    Gates (dm, dh, dn) are small and well-behaved — no transform needed.
 
     Args:
         model:     VectorFieldNet
         states:    (N, 4) — [V, m, h, n] per sample
         I_ext:     (N,) — external current per sample
         dydt_true: (N, 4) — ground truth from HH equations
+        sigma:     (4,) — frozen per-component std for normalization
+                   sigma[0] should be computed on log-transformed dV values
 
     Returns:
         loss:     scalar (mean normalized MSE)
-        info:     dict with diagnostics
+        info:     dict with diagnostics (all MSEs are normalized)
     """
     dydt_pred = model.predict_batch(states, I_ext)  # (N, 4)
 
-    # Per-component variance for normalization
-    sigma = jnp.std(dydt_true, axis=0)               # (4,)
-    sigma = jnp.maximum(sigma, 1e-6)                  # avoid division by zero
+    # Log-transform dV/dt (both pred and true) to compress extreme range
+    dV_pred_log = _log_transform(dydt_pred[:, 0])
+    dV_true_log = _log_transform(dydt_true[:, 0])
+
+    # Build transformed arrays: [log_dV, dm, dh, dn]
+    pred_transformed = jnp.concatenate([
+        dV_pred_log[:, None], dydt_pred[:, 1:]
+    ], axis=-1)
+    true_transformed = jnp.concatenate([
+        dV_true_log[:, None], dydt_true[:, 1:]
+    ], axis=-1)
 
     # Normalized residuals
-    residuals = (dydt_pred - dydt_true) / sigma       # (N, 4)
-    per_component = jnp.mean(residuals ** 2, axis=0)  # (4,)
+    residuals = (pred_transformed - true_transformed) / sigma  # (N, 4)
+    per_component = jnp.mean(residuals ** 2, axis=0)           # (4,)
     loss = jnp.mean(per_component)
-
-    # Raw (unnormalized) MSE for monitoring
-    raw_mse = jnp.mean((dydt_pred - dydt_true) ** 2, axis=0)  # (4,)
 
     info = {
         "field_loss": loss,
-        "mse_dV": raw_mse[0],
-        "mse_dm": raw_mse[1],
-        "mse_dh": raw_mse[2],
-        "mse_dn": raw_mse[3],
-        "sigma_dV": sigma[0],
-        "sigma_dm": sigma[1],
-        "sigma_dh": sigma[2],
-        "sigma_dn": sigma[3],
+        "nmse_dV": per_component[0],
+        "nmse_dm": per_component[1],
+        "nmse_dh": per_component[2],
+        "nmse_dn": per_component[3],
     }
 
     return loss, info
@@ -187,7 +196,7 @@ def boundary_loss(model, V_obs, I_ext_hh, latent_gates, dVdt_obs, t_ms):
 
 def total_phase2_loss(model, latent_gates, conversion_factor,
                       V_obs, I_ext_pA, dVdt_obs, t_ms,
-                      hh, sampler, sampler_key,
+                      hh, sampler, sampler_key, sigma,
                       field_weight=0.1,
                       gating_weight=1.0,
                       smooth_weight=0.01,
@@ -234,7 +243,7 @@ def total_phase2_loss(model, latent_gates, conversion_factor,
     # Anti-forgetting field loss on fresh HH samples
     states_fresh, I_fresh = sampler.mixed_sample(sampler_key, field_batch_size)
     dydt_true = hh.derivatives_batch(states_fresh, I_fresh)
-    fld_loss, field_info = field_loss(model, states_fresh, I_fresh, dydt_true)
+    fld_loss, field_info = field_loss(model, states_fresh, I_fresh, dydt_true, sigma)
 
     # Total
     total = (dV_loss
