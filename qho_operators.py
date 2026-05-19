@@ -24,7 +24,14 @@ class QuantumHarmonicOscillator:
 
     @property
     def x4(self) -> np.ndarray:
-        return linalg.matrix_power(self.x, 4)
+        large_N = self.N + 4
+        superdiagonal_elements = np.sqrt(np.arange(1, large_N))
+        a_large = np.diag(superdiagonal_elements, k=1)
+        a_dagger_large = a_large.conj().T
+        scaling_factor = 1.0 / np.sqrt(2.0)
+        x_large = scaling_factor * (a_large + a_dagger_large)
+        x4_large = linalg.matrix_power(x_large, 4)
+        return x4_large[:self.N, :self.N]
 
     @property
     def h0(self) -> np.ndarray:

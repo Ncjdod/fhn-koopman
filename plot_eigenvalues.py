@@ -4,7 +4,7 @@ from qho_operators import QuantumHarmonicOscillator
 
 def main():
     n_values = list(range(1, 11, 1))
-    alpha_values = [0.1, 0.5, 1.0]
+    alpha_values = [5.0, 8.0, 10.0]
 
     plt.figure(figsize=(10, 6))
 
