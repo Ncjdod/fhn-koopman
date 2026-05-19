@@ -1,10 +1,10 @@
 # Projects
 
-A collection of scientific computing, biophysical modeling, and electrochemistry analysis tools.
+A collection of scientific computing, biophysical modeling, and physics simulation tools.
 
 ## General Themes
 
-The projects in this repository focus on three primary computational areas:
+The projects in this repository focus on two primary computational areas:
 
 ### 1. Neural Networks and Ordinary Differential Equations
 
@@ -14,15 +14,7 @@ This section explores the integration of neural networks with physical dynamics,
 * **FitzHugh-Nagumo Model (`neural-ode/fbh-model/`)**: A simplified model of membrane excitability used to explore basic Neural ODE configurations.
 * **Hodgkin-Huxley Model (`neural-ode/hh-model/` & `neural-ode/hh-field-model/`)**: Trajectory-fitting models that reconstruct 4D neural dynamics and fine-tune parameters using real electrophysiology recordings.
 
-### 2. Lithium-Ion Battery Electrochemical Analysis
-
-Located in `lithium-ion-battery/`.
-
-Tools and pipelines for processing, cleaning, and analyzing electrochemical data from lithium-ion batteries.
-* **Data Processing (`data-cleaning/`)**: Automated scripts to parse and clean raw battery cycling datasets.
-* **Capacity and Voltage Profiles (`visualizations/`)**: Analysis of charge-discharge curves and differential capacity (dQ/dV) to inspect aging and battery behavior.
-
-### 3. Scientific and Biophysical Simulations
+### 2. Scientific and Biophysical Simulations
 
 Located in `scientific-simulations/`.
 
