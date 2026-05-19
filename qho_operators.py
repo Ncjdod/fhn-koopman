@@ -25,3 +25,16 @@ class QuantumHarmonicOscillator:
     @property
     def x4(self) -> np.ndarray:
         return linalg.matrix_power(self.x, 4)
+
+    @property
+    def h0(self) -> np.ndarray:
+        diagonal_elements = 0.5 + np.arange(self.N)
+        return np.diag(diagonal_elements)
+
+    @property
+    def h(self) -> np.ndarray:
+        return self.h0 + self.alpha * self.x4
+
+    @property
+    def eigenvalues(self) -> np.ndarray:
+        return linalg.eigh(self.h)[0]
