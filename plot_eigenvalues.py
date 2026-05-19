@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from qho_operators import QuantumHarmonicOscillator
 
 def main():
-    n_values = list(range(10, 101, 5))
+    n_values = list(range(1, 11, 1))
     alpha_values = [0.1, 0.5, 1.0]
 
     plt.figure(figsize=(10, 6))
@@ -17,7 +17,7 @@ def main():
 
     plt.xlabel("N")
     plt.ylabel("Minimal Eigenvalue (Ground State Energy)")
-    plt.title("Minimal Eigenvalue of Perturbed QHO vs Dimension N")
+    plt.title("Minimal Eigenvalue of Perturbed QHO vs Dimension N (N from 1 to 10)")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
