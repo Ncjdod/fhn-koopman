@@ -29,7 +29,7 @@ Reordering basis into even ($0, 2, 4, \dots$) and odd ($1, 3, 5, \dots$) coordin
 | 400 | 32.48 ms | 21.82 ms | 1.49x |
 | 500 | 52.57 ms | 39.72 ms | 1.32x |
 
-## 3. Convergence of Ground State Energy vs Perturbation Strength (\lambda)
+## 3. Convergence of Ground State Energy vs Perturbation Strength ($\lambda$)
 The minimum Hilbert space dimension $N$ required to achieve ground state energy convergence to $< 10^{-8}$ eV:
 
 | Perturbation Strength (\lambda) | Minimum N for Ground State Convergence |
@@ -40,7 +40,7 @@ The minimum Hilbert space dimension $N$ required to achieve ground state energy 
 | 100.0 | 119 |
 | 1000.0 | 119 |
 
-## 4. Convergence of Higher Energy States (\lambda = 5.0)
+## 4. Convergence of Higher Energy States ($\lambda = 5.0$)
 Minimum $N$ required to achieve state energy convergence to $< 10^{-8}$ eV for higher excited states:
 
 | State Index (k) | Minimum N for State Convergence |
