@@ -14,14 +14,25 @@ This section explores the integration of neural networks with physical dynamics,
 * **FitzHugh-Nagumo Model (`neural-ode/fbh-model/`)**: A simplified model of membrane excitability used to explore basic Neural ODE configurations.
 * **Hodgkin-Huxley Model (`neural-ode/hh-model/` & `neural-ode/hh-field-model/`)**: Trajectory-fitting models that reconstruct 4D neural dynamics and fine-tune parameters using real electrophysiology recordings.
 
-### 2. Scientific and Biophysical Simulations
+### 2. Scientific Analysis and Simulations
 
-Located in `scientific-simulations/`.
+Located in `scientific-analysis-and-simulations/`.
 
-Classical physics and statistical mechanics simulations implemented with high-performance numerical routines.
-* **Ising Model (`simulations/ising_simulation.py`)**: A 2D spin lattice simulation using Monte Carlo Metropolis dynamics optimized with JAX.
-* **Reaction-Diffusion System (`simulations/gray_scott_model.py`)**: An implementation of the Gray-Scott model showing spatial pattern formation.
-* **Chaos and PDEs (`simulations/`)**: Simulators for chaotic attractors (Lorenz and Hénon-Heiles systems) and numerical solutions to the 1D heat equation.
+Classical physics, statistical mechanics, and quantum mechanics simulations implemented with high-performance numerical routines.
+
+#### Basic Simulations (`basic-simulations/`)
+
+Organized into individual subfolders containing the model scripts and their corresponding visualizations:
+* **Ising Model (`ising/`)**: A 2D spin lattice simulation using Monte Carlo Metropolis dynamics optimized with JAX, including generated simulation animations.
+* **Reaction-Diffusion System (`gray-scott/`)**: An implementation of the Gray-Scott model showing spatial pattern formation, including live pattern renders.
+* **Heated Rod PDE (`heated-rod-1d/`)**: Numerical solution to the 1D heat equation showing thermal stabilization.
+* **Chaotic Systems (`henon-hailes/` & `lorenz-attractor/`)**: Simulators for chaotic attractors (Lorenz and Hénon-Heiles systems).
+* **Hebbian learning (`binary-hebbian/`)**: Synaptic spike learning simulator.
+
+#### System Analysis (`system-analysis/`)
+
+Focuses on the analytical study of quantum and physical systems:
+* **Quantum Harmonic Oscillator (`quantum-harmonic-oscillator/`)**: Numerical solvers for a 1D quantum harmonic oscillator with quartic perturbation using Galerkin projection, including eigenvector parity verification, block-diagonalization benchmarks, and energy state convergence analysis.
 
 ## Installation and Setup
 
