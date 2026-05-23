@@ -46,9 +46,41 @@ class QuantumHarmonicOscillator:
         return self.h0 + self.alpha * self.x4
 
     @property
+    def h_even(self) -> np.ndarray:
+        even_indices = np.arange(0, self.N, 2)
+        return self.h[even_indices, :][:, even_indices]
+
+    @property
+    def h_odd(self) -> np.ndarray:
+        odd_indices = np.arange(1, self.N, 2)
+        return self.h[odd_indices, :][:, odd_indices]
+
+    @property
     def eigenvalues(self) -> np.ndarray:
         return linalg.eigh(self.h)[0]
+
+    @property
+    def eigenvalues_block(self) -> np.ndarray:
+        even_eigenvalues = linalg.eigh(self.h_even)[0]
+        odd_eigenvalues = linalg.eigh(self.h_odd)[0]
+        return np.sort(np.concatenate([even_eigenvalues, odd_eigenvalues]))
 
     def get_perturbed_state(self, k: int) -> tuple[float, np.ndarray]:
         eigenvalues, eigenvectors = linalg.eigh(self.h)
         return eigenvalues[k], eigenvectors[:, k]
+
+    def get_perturbed_state_block(self, k: int) -> tuple[float, np.ndarray]:
+        if k % 2 == 0:
+            even_index = k // 2
+            even_eigenvalues, even_eigenvectors = linalg.eigh(self.h_even)
+            state_energy = even_eigenvalues[even_index]
+            state_vector = np.zeros(self.N)
+            state_vector[np.arange(0, self.N, 2)] = even_eigenvectors[:, even_index]
+            return state_energy, state_vector
+        else:
+            odd_index = k // 2
+            odd_eigenvalues, odd_eigenvectors = linalg.eigh(self.h_odd)
+            state_energy = odd_eigenvalues[odd_index]
+            state_vector = np.zeros(self.N)
+            state_vector[np.arange(1, self.N, 2)] = odd_eigenvectors[:, odd_index]
+            return state_energy, state_vector

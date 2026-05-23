@@ -23,7 +23,7 @@ def main():
         n_values_state = [N for N in n_values if N > k]
         for N in n_values_state:
             qho = QuantumHarmonicOscillator(N=N, alpha=alpha_physical, m=m, omega=omega, hbar=hbar)
-            val, _ = qho.get_perturbed_state(k)
+            val, _ = qho.get_perturbed_state_block(k)
             energies.append(val / 1.602176634e-19)
         plt.plot(n_values_state, energies, "-", label=f"State k={k}")
         print(f"State k={k} | Converged energy (N=100) = {energies[-1]:.10f} eV")
