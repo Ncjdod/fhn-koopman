@@ -11,7 +11,7 @@ def main():
 
     n_values = list(range(1, 121, 1))
 
-    # 1. Ground State Energy Convergence vs N for different lambda
+    # 1. Ground State Energy Convergence vs N for different lambda (Log Scale)
     plt.figure(figsize=(10, 6))
     lambda_values = [5.0, 8.0, 10.0, 100.0, 1000.0]
     for lambda_val in lambda_values:
@@ -23,10 +23,11 @@ def main():
             val, _ = qho.get_perturbed_state_block(0)
             energies.append(val / 1.602176634e-19)
         plt.plot(n_values, energies, "-", label=f"lambda = {lambda_val}")
+    plt.yscale("log")
     plt.xlabel("N")
-    plt.ylabel("Ground State Energy (eV)")
+    plt.ylabel("Ground State Energy (eV) [Log Scale]")
     plt.title("Ground State Energy Convergence vs N")
-    plt.grid(True)
+    plt.grid(True, which="both", ls="--")
     plt.legend()
     plt.tight_layout()
     plt.savefig("convergence_lambda.png", dpi=300)
@@ -51,27 +52,6 @@ def main():
     plt.legend()
     plt.tight_layout()
     plt.savefig("convergence_states.png", dpi=300)
-    plt.close()
-
-    # 3. Eigenvector Parity Visualization (N=10)
-    qho_10 = QuantumHarmonicOscillator(N=10, alpha=alpha_physical, m=m, omega=omega, hbar=hbar)
-    _, v0 = qho_10.get_perturbed_state_block(0)
-    _, v1 = qho_10.get_perturbed_state_block(1)
-    _, v2 = qho_10.get_perturbed_state_block(2)
-
-    indices = np.arange(10)
-    plt.figure(figsize=(10, 6))
-    plt.bar(indices - 0.2, v0, width=0.2, label="State k=0 (Even)")
-    plt.bar(indices, v1, width=0.2, label="State k=1 (Odd)")
-    plt.bar(indices + 0.2, v2, width=0.2, label="State k=2 (Even)")
-    plt.xlabel("Basis index n")
-    plt.ylabel("Eigenvector coefficient")
-    plt.title("Eigenvector Coefficients showing Parity (N=10)")
-    plt.xticks(indices)
-    plt.grid(True, axis="y")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("eigenvector_parity.png", dpi=300)
     plt.close()
 
 if __name__ == "__main__":
