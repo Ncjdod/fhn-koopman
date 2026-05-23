@@ -12,7 +12,7 @@ def main():
     quartic_scale = energy_scale / (length_scale ** 4)
 
     n_values = list(range(1, 101, 1))
-    alpha_coefficients = [5.0, 8.0, 10.0]
+    alpha_coefficients = [100.0, 1000.0]
 
     plt.figure(figsize=(10, 6))
 
