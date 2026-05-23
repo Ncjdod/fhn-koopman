@@ -18,19 +18,19 @@ def main():
     quartic_scale = energy_scale / (length_scale ** 4)
     alpha_physical = alpha_coeff * quartic_scale
     
-    for state_index in [0, 1, 2]:
+    for k in [0, 1, 2]:
         energies = []
-        n_values_state = [N for N in n_values if N > state_index]
+        n_values_state = [N for N in n_values if N > k]
         for N in n_values_state:
-            qho = QuantumHarmonicOscillator(N=N, alpha=alpha_physical, k=4, m=m, omega=omega, hbar=hbar)
-            val, _ = qho.get_energy_state(state_index)
+            qho = QuantumHarmonicOscillator(N=N, alpha=alpha_physical, m=m, omega=omega, hbar=hbar)
+            val, _ = qho.get_perturbed_state(k)
             energies.append(val / 1.602176634e-19)
-        plt.plot(n_values_state, energies, "-", label=f"State {state_index} (k=4 perturbation)")
-        print(f"State {state_index} (k=4) | Converged energy (N=100) = {energies[-1]:.10f} eV")
+        plt.plot(n_values_state, energies, "-", label=f"State k={k}")
+        print(f"State k={k} | Converged energy (N=100) = {energies[-1]:.10f} eV")
 
     plt.xlabel("N")
     plt.ylabel("Energy in eV")
-    plt.title("Perturbed QHO Energy Levels vs Dimension N (alpha_coeff = 5)")
+    plt.title("Perturbed QHO Energy Levels (k = 0, 1, 2) vs Dimension N (alpha_coeff = 5)")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
