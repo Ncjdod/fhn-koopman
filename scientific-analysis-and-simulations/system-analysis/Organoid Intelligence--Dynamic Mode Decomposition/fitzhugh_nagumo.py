@@ -194,7 +194,7 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
 # 3. Scientific Plotting and Visualization
 # =====================================================================
 
-def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_target=None):
+def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_target=None, save_path=None, show_plot=True):
     """
     Generates premium-quality scientific plots of the simulation results.
     
@@ -205,6 +205,8 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
         y0: Initial conditions
         fitted_data: Optional fitted trajectory from Optax
         noisy_target: Optional noisy data used in fitting
+        save_path: Path to save the plot as a PNG image
+        show_plot: Whether to display the plot interactively using plt.show()
     """
     v = ys[:, 0]
     w = ys[:, 1]
@@ -274,8 +276,14 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
                  fontsize=15, fontweight='bold', y=0.98)
     plt.tight_layout()
     
-    # Create the directory if saving, but plt.show() displays it
-    plt.show()
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+        print(f"Saved visualization plot to {save_path}")
+        
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
 
 
 # =====================================================================
@@ -300,6 +308,7 @@ def main():
     # Output and demo options
     parser.add_argument('--output', type=str, default=None, help="Output CSV filename to save time series (e.g. fhn_data.csv)")
     parser.add_argument('--no-plot', action='store_true', help="Disable matplotlib plotting")
+    parser.add_argument('--save-plot', type=str, default=None, help="Save the plot as a PNG image file (e.g. fhn_plot.png)")
     parser.add_argument('--fit-demo', action='store_true', help="Run parameters fitting demonstration using Optax")
     
     args = parser.parse_args()
@@ -364,14 +373,16 @@ def main():
             print(f"Error saving CSV: {e}")
             
     # 4. Visualization
-    if not args.no_plot:
-        print("\nOpening matplotlib visualization...")
+    if not args.no_plot or args.save_plot:
+        print("\nGenerating matplotlib visualization...")
         plot_results(
             t_span, ys, 
             a=args.a, b=args.b, tau=args.tau, I_ext=args.I, 
             y0=y0, 
             fitted_data=fitted_trajectory, 
-            noisy_target=noisy_target
+            noisy_target=noisy_target,
+            save_path=args.save_plot,
+            show_plot=not args.no_plot
         )
 
 
