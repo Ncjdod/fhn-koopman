@@ -134,33 +134,37 @@ def main():
             print(f"Error running DMD: {e}")
 
     if args.dmdc:
-        print(f"\nRunning Dynamic Mode Decomposition with Control (DMDc)...")
+        print(f"\nRunning Bilinear Dynamic Mode Decomposition with Control (Bilinear DMDc)...")
         print(f"Hankel parameters: H={args.dmd_H} | Truncation Ranks: state r={args.dmd_r}, augmented p={args.dmd_p}")
         
         try:
-            A_tilde, B_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U = run_dmdc(
+            A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U = run_dmdc(
                 ys[:, 0], u_data, H=args.dmd_H, r=args.dmd_r, p=args.dmd_p
             )
             
-            print("DMDc Complete!")
-            print(f"Augmented state-input matrix Omega shape: ({dmdc_X.shape[0] + dmdc_U.shape[0]}, {dmdc_X.shape[1]})")
+            print("Bilinear DMDc Complete!")
+            print(f"Augmented state-input matrix Omega shape: ({dmdc_X.shape[0] * 2 + dmdc_U.shape[0]}, {dmdc_X.shape[1]})")
             print(f"Autonomous transition A_tilde shape: {A_tilde.shape}")
             print(f"Control coupling B_tilde shape: {B_tilde.shape}")
+            print(f"Bilinear coupling C_tilde shape: {C_tilde.shape}")
             print(f"Top 5 Intrinsic Singular Values: {s_x[:5]}")
             print(f"Intrinsic Koopman Eigenvalues (first 5):\n{dmdc_eigenvalues[:5]}")
             
             if args.output:
                 dmdc_A_path = args.output.replace(".csv", "_dmdc_A.csv")
                 dmdc_B_path = args.output.replace(".csv", "_dmdc_B.csv")
+                dmdc_C_path = args.output.replace(".csv", "_dmdc_C.csv")
                 np.savetxt(dmdc_A_path, A_tilde, delimiter=",")
                 np.savetxt(dmdc_B_path, B_tilde, delimiter=",")
+                np.savetxt(dmdc_C_path, C_tilde, delimiter=",")
                 print(f"Saved autonomous operator A_tilde to {dmdc_A_path}")
                 print(f"Saved control operator B_tilde to {dmdc_B_path}")
+                print(f"Saved bilinear operator C_tilde to {dmdc_C_path}")
                 
             if not args.no_plot or args.save_plot:
-                print("Generating DMDc matplotlib spectra and control plots...")
+                print("Generating Bilinear DMDc matplotlib spectra and control plots...")
                 plot_dmdc_results(
-                    s_x, s_p, dmdc_eigenvalues, B_tilde, r=args.dmd_r, H=args.dmd_H, p=args.dmd_p,
+                    s_x, s_p, dmdc_eigenvalues, B_tilde, C_tilde, r=args.dmd_r, H=args.dmd_H, p=args.dmd_p,
                     save_path=args.save_plot, show_plot=not args.no_plot
                 )
         except Exception as e:

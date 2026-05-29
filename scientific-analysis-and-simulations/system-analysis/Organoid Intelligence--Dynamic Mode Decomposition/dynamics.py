@@ -53,7 +53,7 @@ def run_hankel_dmd(v_data, H, r):
     return A, eigenvalues, s, X, Y
 
 def run_dmdc(v_data, u_data, H, r, p):
-    """Computes Dynamic Mode Decomposition with Control (DMDc) using delay-embedded state and control inputs."""
+    """Computes Bilinear Dynamic Mode Decomposition with Control (Bilinear DMDc) using delay-embedded state and control inputs."""
     v_data = jnp.asarray(v_data, dtype=jnp.float32)
     u_data = jnp.asarray(u_data, dtype=jnp.float32)
     T = len(v_data)
@@ -67,7 +67,9 @@ def run_dmdc(v_data, u_data, H, r, p):
     
     X = H_state[:, :-1]
     Y = H_state[:, 1:]
-    Omega = jnp.concatenate([X, U_c], axis=0)
+    
+    X_kron_U = X * U_c
+    Omega = jnp.concatenate([X, U_c, X_kron_U], axis=0)
     
     U_tilde, s_p, V_p_T = jnp.linalg.svd(Omega, full_matrices=False)
     V_p = V_p_T.T
@@ -78,7 +80,8 @@ def run_dmdc(v_data, u_data, H, r, p):
     s_p_r = s_p[:p]
     
     U_p1 = U_p[:H, :]
-    U_p2 = U_p[H:, :]
+    U_p2 = U_p[H:H+1, :]
+    U_p3 = U_p[H+1:, :]
     
     U_x, s_x, V_x_T = jnp.linalg.svd(X, full_matrices=False)
     r = min(r, U_x.shape[1])
@@ -87,6 +90,8 @@ def run_dmdc(v_data, u_data, H, r, p):
     Sigma_p_inv = jnp.diag(1.0 / s_p_r)
     A_tilde = U_r.T @ Y @ V_p @ Sigma_p_inv @ U_p1.T @ U_r
     B_tilde = U_r.T @ Y @ V_p @ Sigma_p_inv @ U_p2.T
+    C_tilde = U_r.T @ Y @ V_p @ Sigma_p_inv @ U_p3.T @ U_r
+    
     eigenvalues = jnp.linalg.eigvals(A_tilde)
     
-    return A_tilde, B_tilde, eigenvalues, s_x, s_p, X, Y, U_c
+    return A_tilde, B_tilde, C_tilde, eigenvalues, s_x, s_p, X, Y, U_c
