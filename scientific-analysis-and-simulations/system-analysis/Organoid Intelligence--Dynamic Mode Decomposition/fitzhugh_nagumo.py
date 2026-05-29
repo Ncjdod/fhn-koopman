@@ -29,11 +29,39 @@ import optax
 # 1. FitzHugh-Nagumo Equations & Solver
 # =====================================================================
 
+def get_external_current(t, I_type, I_val):
+    """
+    Computes external stimulus current dynamically at time t.
+    Supports constant, step, sine, and pulse time series currents.
+    Uses JAX where-clauses for stable tracing/JIT compilation.
+    """
+    constant_current = I_val
+    
+    # Step current: active between t=10 and t=80
+    step_current = jnp.where((t >= 10.0) & (t <= 80.0), I_val, 0.0)
+    
+    # Sine current: oscillating around a base current
+    sine_current = I_val * (1.0 + 0.5 * jnp.sin(0.2 * t))
+    
+    # Pulse current: periodic pulse train (period 20, active for 5)
+    pulse_current = jnp.where(jnp.mod(t, 20.0) <= 5.0, I_val, 0.0)
+    
+    # Branch at compile-time on static string parameter
+    if I_type == 'step':
+        return step_current
+    elif I_type == 'sine':
+        return sine_current
+    elif I_type == 'pulse':
+        return pulse_current
+    else:
+        return constant_current
+
+
 def fhn_vector_field(t, y, args):
     """
     FitzHugh-Nagumo Ordinary Differential Equations.
     
-    dv/dt = v - v^3/3 - w + I_ext
+    dv/dt = v - v^3/3 - w + I_ext(t)
     dw/dt = (v + a - b*w) / tau
     
     Args:
@@ -41,18 +69,19 @@ def fhn_vector_field(t, y, args):
         y: State array of shape (2,) representing [v, w]
            v: Membrane potential
            w: Recovery variable
-        args: Tuple of parameters (a, b, tau, I_ext)
+        args: Tuple of parameters (a, b, tau, I_type, I_val)
     """
     v, w = y
-    a, b, tau, I_ext = args
+    a, b, tau, I_type, I_val = args
     
+    I_ext = get_external_current(t, I_type, I_val)
     dv_dt = v - (v**3) / 3.0 - w + I_ext
     dw_dt = (v + a - b * w) / tau
     
     return jnp.stack([dv_dt, dw_dt])
 
 
-def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_ext=0.5, rtol=1e-6, atol=1e-6):
+def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_type='constant', I_val=0.5, rtol=1e-6, atol=1e-6):
     """
     Simulates the FHN model using the Diffrax Tsit5 adaptive solver.
     
@@ -60,7 +89,8 @@ def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_ext=0.5, rtol=1e-6, atol=
         y0: Initial state [v0, w0] (shape: (2,))
         t_span: Time steps at which to save results
         a, b, tau: Model parameters
-        I_ext: Constant external stimulus current
+        I_type: Type of external current ('constant', 'step', 'sine', 'pulse')
+        I_val: Amplitude or base value of stimulus current
         rtol, atol: Relative/absolute tolerances for adaptive solver
         
     Returns:
@@ -85,7 +115,7 @@ def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_ext=0.5, rtol=1e-6, atol=
         t1=t_span[-1],
         dt0=0.05,  # initial step suggestion
         y0=jnp.asarray(y0, dtype=jnp.float32),
-        args=(a, b, tau, I_ext),
+        args=(a, b, tau, I_type, I_val),
         saveat=saveat,
         stepsize_controller=stepsize_controller,
         max_steps=10000
@@ -98,7 +128,7 @@ def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_ext=0.5, rtol=1e-6, atol=
 # 2. Parameter Fitting using JAX & Optax
 # =====================================================================
 
-def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
+def fit_fhn_parameters(y0, t_span, noisy_target, I_type, I_val, lr=0.02, steps=150):
     """
     Fits the FHN parameters (a, b, tau) to match target data using gradient descent.
     
@@ -106,7 +136,8 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
         y0: Initial condition [v0, w0]
         t_span: Output time points
         noisy_target: Trajectory data to fit [n_steps, 2]
-        I_ext: Stimulus current used in the target data
+        I_type: Type of external current used in the target data
+        I_val: Amplitude or base value of stimulus current used in target data
         lr: Learning rate for Optax Adam
         steps: Number of optimization steps
         
@@ -120,14 +151,13 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
     noisy_target = jnp.asarray(noisy_target, dtype=jnp.float32)
 
     # Initial guess for parameters: a=0.5, b=0.5, tau=10.0 (true: 0.7, 0.8, 12.5)
-    # We optimize log(params) to enforce positivity during training!
     init_params = jnp.array([0.5, 0.5, 10.0])
     
     optimizer = optax.adam(learning_rate=lr)
     opt_state = optimizer.init(init_params)
     
     @jax.jit
-    def loss_fn(params, y0, t_span, target, I_ext):
+    def loss_fn(params, y0, t_span, target, I_type, I_val):
         # Enforce parameter positivity using absolute value
         a, b, tau = jnp.abs(params)
         
@@ -144,7 +174,7 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
             t1=t_span[-1],
             dt0=0.1,
             y0=y0,
-            args=(a, b, tau, I_ext),
+            args=(a, b, tau, I_type, I_val),
             saveat=saveat,
             stepsize_controller=stepsize_controller,
             adjoint=diffrax.RecursiveCheckpointAdjoint(),
@@ -155,8 +185,8 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
         return jnp.mean((sol.ys - target) ** 2)
 
     @jax.jit
-    def train_step(params, opt_state, y0, t_span, target, I_ext):
-        loss, grads = jax.value_and_grad(loss_fn)(params, y0, t_span, target, I_ext)
+    def train_step(params, opt_state, y0, t_span, target, I_type, I_val):
+        loss, grads = jax.value_and_grad(loss_fn)(params, y0, t_span, target, I_type, I_val)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
@@ -168,7 +198,7 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
     print(f"Initial guesses: a={params[0]:.2f}, b={params[1]:.2f}, tau={params[2]:.2f}")
     
     for step in range(steps):
-        params, opt_state, loss = train_step(params, opt_state, y0, t_span, noisy_target, I_ext)
+        params, opt_state, loss = train_step(params, opt_state, y0, t_span, noisy_target, I_type, I_val)
         loss_history.append(float(loss))
         
         if step % 15 == 0 or step == steps - 1:
@@ -184,7 +214,8 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
         a=fitted_params["a"], 
         b=fitted_params["b"], 
         tau=fitted_params["tau"], 
-        I_ext=I_ext
+        I_type=I_type,
+        I_val=I_val
     )
     
     return fitted_params, loss_history, fitted_trajectory
@@ -249,18 +280,101 @@ def run_hankel_dmd(v_data, H, r):
 
 
 # =====================================================================
+# 2c. Dynamic Mode Decomposition with Control (DMDc)
+# =====================================================================
+
+def run_dmdc(v_data, u_data, H, r, p):
+    """
+    Computes Dynamic Mode Decomposition with Control (DMDc) on Hankel matrices.
+    
+    Args:
+        v_data: Time series array of state (T,) (potential v)
+        u_data: Time series array of time-varying control inputs (T,) (external current)
+        H: Delay embedding dimension
+        r: State truncation rank (autonomous states U_r)
+        p: Augmented space truncation rank (state+control spaces U_p)
+        
+    Returns:
+        A_tilde: Truncated autonomous dynamics transition operator (r, r)
+        B_tilde: Truncated control input matrix (r, 1)
+        eigenvalues: Complex eigenvalues of A_tilde (autonomous modes)
+        s_x: Singular values of state matrix X
+        s_p: Singular values of augmented state-control matrix Omega
+        X, Y: Shifted Hankel matrices
+        U_c: Control input matrix matching Hankel column time slices
+    """
+    v_data = jnp.asarray(v_data, dtype=jnp.float32)
+    u_data = jnp.asarray(u_data, dtype=jnp.float32)
+    T = len(v_data)
+    
+    if H >= T:
+        raise ValueError(f"Hankel delay H ({H}) must be strictly less than time series length T ({T})")
+        
+    K = T - H + 1
+    
+    # 1. Construct Hankel matrix of state
+    H_state = jnp.stack([v_data[i : i + K] for i in range(H)], axis=0)  # (H, K)
+    
+    # Construct control input vector matching columns (causal: input at current lead step)
+    U_c = jnp.stack([u_data[i + H - 1] for i in range(K - 1)], axis=0).reshape(1, -1)  # (1, K-1)
+    
+    # 2. Shifted Hankel matrices X and Y
+    X = H_state[:, :-1]  # (H, K-1)
+    Y = H_state[:, 1:]   # (H, K-1)
+    
+    # 3. Construct Augmented matrix Omega = [X; U_c]
+    Omega = jnp.concatenate([X, U_c], axis=0)  # (H + 1, K-1)
+    
+    # 4. SVD of Omega: Omega = U_p * Sigma_p * V_p^T
+    U_tilde, s_p, V_p_T = jnp.linalg.svd(Omega, full_matrices=False)
+    V_p = V_p_T.T
+    
+    p = min(p, U_tilde.shape[1])
+    U_p = U_tilde[:, :p]             # (H + 1, p)
+    V_p = V_p[:, :p]                 # (K-1, p)
+    s_p_r = s_p[:p]                  # (p,)
+    
+    # Split U_p into autonomous (first H rows) and control (last 1 row)
+    U_p1 = U_p[:H, :]                # (H, p)
+    U_p2 = U_p[H:, :]                # (1, p)
+    
+    # 5. SVD of X for state projection: X = U_x * Sigma_x * V_x^T
+    U_x, s_x, V_x_T = jnp.linalg.svd(X, full_matrices=False)
+    
+    r = min(r, U_x.shape[1])
+    U_r = U_x[:, :r]                 # (H, r)
+    
+    # 6. Compute low-dimensional transition operators A_tilde and B_tilde
+    Sigma_p_inv = jnp.diag(1.0 / s_p_r)
+    
+    # Formula: A_tilde = U_r.T @ Y @ V_p @ Sigma_p^-1 @ U_p1.T @ U_r
+    A_tilde = U_r.T @ Y @ V_p @ Sigma_p_inv @ U_p1.T @ U_r  # (r, r)
+    
+    # Formula: B_tilde = U_r.T @ Y @ V_p @ Sigma_p^-1 @ U_p2.T
+    B_tilde = U_r.T @ Y @ V_p @ Sigma_p_inv @ U_p2.T        # (r, 1)
+    
+    # 7. Koopman autonomous eigenvalues
+    eigenvalues = jnp.linalg.eigvals(A_tilde)
+    
+    return A_tilde, B_tilde, eigenvalues, s_x, s_p, X, Y, U_c
+
+
+# =====================================================================
 # 3. Scientific Plotting and Visualization
 # =====================================================================
 
-def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_target=None, save_path=None, show_plot=True):
+def plot_results(t_span, ys, a, b, tau, I_type, I_val, y0, u_data=None, fitted_data=None, noisy_target=None, save_path=None, show_plot=True):
     """
     Generates premium-quality scientific plots of the simulation results.
     
     Args:
         t_span: Time steps
         ys: Trajectory of shape (n_steps, 2)
-        a, b, tau, I_ext: Parameters
+        a, b, tau: Model parameters
+        I_type: Current simulation type
+        I_val: Current amplitude
         y0: Initial conditions
+        u_data: Time series array of actual external current values
         fitted_data: Optional fitted trajectory from Optax
         noisy_target: Optional noisy data used in fitting
         save_path: Path to save the plot as a PNG image
@@ -284,6 +398,10 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
     ax1.plot(t_span, v, label=r'Membrane Potential $v(t)$', color=c_v, linewidth=2.0)
     ax1.plot(t_span, w, label=r'Recovery Variable $w(t)$', color=c_w, linewidth=2.0)
     
+    # Plot dynamic external current if provided
+    if u_data is not None:
+        ax1.plot(t_span, u_data, label=r'Stimulus Current $I_{ext}(t)$', color='#d62728', linewidth=1.5, linestyle=':', alpha=0.9)
+    
     if noisy_target is not None:
         ax1.scatter(t_span[::5], noisy_target[::5, 0], color='black', alpha=0.3, s=8, label='Noisy Target $v_{meas}$')
     if fitted_data is not None:
@@ -299,11 +417,11 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
     # --- Right Subplot: Phase Space & Nullclines ---
     ax2 = fig.add_subplot(122)
     
-    # Plot nullclines
-    # v-nullcline: w = v - v^3/3 + I_ext
+    # Plot nullclines using base external current I_val
+    # v-nullcline: w = v - v^3/3 + I_val
     # w-nullcline: w = (v + a) / b
     v_vals = np.linspace(np.min(v) - 0.5, np.max(v) + 0.5, 400)
-    v_nullcline = v_vals - (v_vals**3) / 3.0 + I_ext
+    v_nullcline = v_vals - (v_vals**3) / 3.0 + I_val
     w_nullcline = (v_vals + a) / b
     
     ax2.plot(v_vals, v_nullcline, '--', color=c_v_null, alpha=0.8, linewidth=1.5, label=r'$v$-nullcline ($dv/dt=0$)')
@@ -313,11 +431,11 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
     ax2.plot(v, w, color='#9467bd', linewidth=2.5, label='System Trajectory')
     ax2.scatter(y0[0], y0[1], color='red', s=50, zorder=5, label=r'Initial Condition $(v_0, w_0)$')
     
-    # Highlight fixed point (intersection of nullclines)
-    # The fixed point satisfies: (v + a)/b = v - v^3/3 + I_ext
+    # Highlight fixed point (intersection of nullclines at base external current I_val)
+    # The fixed point satisfies: (v + a)/b = v - v^3/3 + I_val
     # We can plot the intersection cleanly by finding the numerical root
     from scipy.optimize import fsolve
-    fp_func = lambda x: x - (x**3)/3.0 - (x + a)/b + I_ext
+    fp_func = lambda x: x - (x**3)/3.0 - (x + a)/b + I_val
     fp_v = float(fsolve(fp_func, 0.0)[0])
     fp_w = (fp_v + a) / b
     ax2.scatter(fp_v, fp_w, color='black', marker='*', s=120, zorder=6, label=f'Fixed Point ({fp_v:.2f}, {fp_w:.2f})')
@@ -330,13 +448,77 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
     ax2.legend(loc='lower right', frameon=True, facecolor='white', framealpha=0.9)
     ax2.grid(True, linestyle='--', alpha=0.6)
     
-    plt.suptitle(f"FitzHugh-Nagumo Model Dynamics\n(a={a:.2f}, b={b:.2f}, \u03c4={tau:.2f}, I={I_ext:.2f})", 
+    plt.suptitle(f"FitzHugh-Nagumo Model Dynamics\n(a={a:.2f}, b={b:.2f}, \u03c4={tau:.2f}, Current={I_type} ({I_val:.2f}))", 
                  fontsize=15, fontweight='bold', y=0.98)
     plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=300)
         print(f"Saved visualization plot to {save_path}")
+        
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_dmdc_results(s_x, s_p, eigenvalues, B_tilde, r, H, p, save_path=None, show_plot=True):
+    """
+    Visualizes DMDc results:
+    1. Singular value decay of X and Omega (augmented space).
+    2. Koopman eigenvalues of A_tilde on unit circle (base autonomous dynamics).
+    3. Input control mode sensitivities of B_tilde (influence magnitude).
+    """
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
+    fig = plt.figure(figsize=(18, 5.5))
+    
+    # --- 1. SVD Energy Spectra ---
+    ax1 = fig.add_subplot(131)
+    ax1.semilogy(s_x, 'o-', color='#1f77b4', markersize=4, label='State X Spectrum')
+    ax1.semilogy(s_p, 's--', color='#9467bd', markersize=4, label=r'Augmented $\Omega$ Spectrum')
+    ax1.axvline(x=r-1, color='#d62728', linestyle=':', label=f'State Truncation r={r}')
+    ax1.axvline(x=p-1, color='#2ca02c', linestyle='-.', label=f'Augmented Truncation p={p}')
+    ax1.set_title("SVD Energy Spectra Decay", fontsize=12, fontweight='bold')
+    ax1.set_xlabel("Singular Value Index", fontsize=11)
+    ax1.set_ylabel("Singular Value Magnitude", fontsize=11)
+    ax1.legend(frameon=True, facecolor='white', framealpha=0.9)
+    ax1.grid(True, which="both", alpha=0.5)
+    
+    # --- 2. Koopman eigenvalues (Base autonomous Dynamics A) ---
+    ax2 = fig.add_subplot(132)
+    theta = np.linspace(0, 2*np.pi, 200)
+    ax2.plot(np.cos(theta), np.sin(theta), color='gray', linestyle='--', alpha=0.7, label='Unit Circle')
+    ax2.scatter(eigenvalues.real, eigenvalues.imag, color='#2ca02c', edgecolor='black', s=70, zorder=5, label='Autonomous modes')
+    ax2.set_title(f"Intrinsic Koopman Spectrum (r={r})", fontsize=12, fontweight='bold')
+    ax2.set_xlabel(r"Real Part $\Re(\lambda)$", fontsize=11)
+    ax2.set_ylabel(r"Imaginary Part $\Im(\lambda)$", fontsize=11)
+    ax2.grid(True, alpha=0.5)
+    ax2.axhline(0, color='black', linewidth=0.5)
+    ax2.axvline(0, color='black', linewidth=0.5)
+    ax2.set_aspect('equal')
+    ax2.legend(frameon=True, loc='upper right')
+    ax2.set_xlim(-1.4, 1.4)
+    ax2.set_ylim(-1.4, 1.4)
+    
+    # --- 3. Input Mode Control Sensitivities (B) ---
+    ax3 = fig.add_subplot(133)
+    b_magnitudes = np.abs(np.squeeze(B_tilde))
+    indices = np.arange(len(b_magnitudes))
+    ax3.bar(indices, b_magnitudes, color='#ff7f0e', edgecolor='black', alpha=0.85, width=0.6)
+    ax3.set_title("Control Input Sensitivity (|B|)", fontsize=12, fontweight='bold')
+    ax3.set_xlabel("Subspace Mode Index", fontsize=11)
+    ax3.set_ylabel("Influence Magnitude", fontsize=11)
+    ax3.set_xticks(indices)
+    ax3.grid(True, linestyle='--', alpha=0.5)
+    
+    plt.suptitle(f"Dynamic Mode Decomposition with Control (DMDc) Analysis\n(Base Dynamics A_tilde: {r}x{r} | Input Coupling B_tilde: {r}x1 | Delays H={H})", 
+                 fontsize=14, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    
+    if save_path:
+        dmdc_save_path = save_path.replace(".png", "_dmdc.png")
+        plt.savefig(dmdc_save_path, dpi=300)
+        print(f"Saved DMDc visualization plot to {dmdc_save_path}")
         
     if show_plot:
         plt.show()
@@ -412,12 +594,16 @@ def main():
     parser.add_argument('--a', type=float, default=0.7, help="Parameter a (default: 0.7)")
     parser.add_argument('--b', type=float, default=0.8, help="Parameter b (default: 0.8)")
     parser.add_argument('--tau', type=float, default=12.5, help="Time constant tau (default: 12.5)")
-    parser.add_argument('--I', type=float, default=0.5, help="Constant external current I (default: 0.5)")
+    parser.add_argument('--I', type=float, default=0.5, help="Constant external current amplitude/value I (default: 0.5)")
+    parser.add_argument('--I-type', type=str, default='constant', choices=['constant', 'step', 'sine', 'pulse'],
+                        help="Type of dynamic external current (constant, step, sine, pulse) (default: constant)")
     
-    # Hankel-DMD settings
+    # Hankel-DMD/DMDc settings
     parser.add_argument('--dmd', action='store_true', help="Run Hankel Dynamic Mode Decomposition (Hankel-DMD)")
+    parser.add_argument('--dmdc', action='store_true', help="Run Dynamic Mode Decomposition with Control (DMDc)")
     parser.add_argument('--dmd-H', type=int, default=50, help="Delay embedding dimension H for Hankel matrix (default: 50)")
-    parser.add_argument('--dmd-r', type=int, default=10, help="Truncation rank r for SVD modes (default: 10)")
+    parser.add_argument('--dmd-r', type=int, default=10, help="Truncation rank r for state projection subspace (default: 10)")
+    parser.add_argument('--dmd-p', type=int, default=15, help="Truncation rank p for DMDc augmented state-control matrix (default: 15)")
     
     # Time settings
     parser.add_argument('--t-max', type=float, default=100.0, help="Total simulation time (default: 100.0)")
@@ -436,14 +622,17 @@ def main():
     n_steps = int(args.t_max / args.dt) + 1
     t_span = jnp.linspace(0.0, args.t_max, n_steps)
     
+    # Pre-generate external current time series for visualization and DMDc
+    u_data = jnp.array([get_external_current(t, args.I_type, args.I) for t in t_span])
+    
     # 1. Run Simulation
     print(f"Simulating FitzHugh-Nagumo model...")
-    print(f"Parameters: a={args.a}, b={args.b}, tau={args.tau}, I_ext={args.I}")
+    print(f"Parameters: a={args.a}, b={args.b}, tau={args.tau}, Current={args.I_type} (amplitude={args.I})")
     print(f"Time span: [0, {args.t_max}] with dt={args.dt} ({n_steps} points)")
     
     ys = simulate_fhn(
         y0, t_span, 
-        a=args.a, b=args.b, tau=args.tau, I_ext=args.I
+        a=args.a, b=args.b, tau=args.tau, I_type=args.I_type, I_val=args.I
     )
     
     # 2. Optional Optax Parameter Fitting Demonstration
@@ -459,7 +648,7 @@ def main():
         
         # Fit parameters
         fitted_params, loss_history, fitted_trajectory = fit_fhn_parameters(
-            y0, t_span, noisy_target, args.I, lr=0.03, steps=150
+            y0, t_span, noisy_target, args.I_type, args.I, lr=0.03, steps=150
         )
         
         print("\nOptimization Complete!")
@@ -475,13 +664,13 @@ def main():
         try:
             with open(filepath, mode='w', newline='') as f:
                 writer = csv.writer(f)
-                header = ['time', 'v_potential', 'w_recovery']
+                header = ['time', 'v_potential', 'w_recovery', 'I_ext']
                 if args.fit_demo:
                     header += ['v_measured', 'w_measured', 'v_fitted', 'w_fitted']
                 writer.writerow(header)
                 
                 for i in range(len(t_span)):
-                    row = [float(t_span[i]), float(ys[i, 0]), float(ys[i, 1])]
+                    row = [float(t_span[i]), float(ys[i, 0]), float(ys[i, 1]), float(u_data[i])]
                     if args.fit_demo:
                         row += [float(noisy_target[i, 0]), float(noisy_target[i, 1]),
                                 float(fitted_trajectory[i, 0]), float(fitted_trajectory[i, 1])]
@@ -507,7 +696,6 @@ def main():
             print(f"Top 5 Singular Values: {s_vals[:5]}")
             print(f"Koopman Eigenvalues (first 5):\n{dmd_eigenvalues[:5]}")
             
-            # Save matrix A to a separate text file or CSV if requested
             if args.output:
                 dmd_output_path = args.output.replace(".csv", "_dmd_A.csv")
                 np.savetxt(dmd_output_path, A_matrix, delimiter=",")
@@ -522,13 +710,48 @@ def main():
         except Exception as e:
             print(f"Error running DMD: {e}")
 
+    # 4b. Dynamic Mode Decomposition with Control (DMDc)
+    if args.dmdc:
+        print(f"\nRunning Dynamic Mode Decomposition with Control (DMDc)...")
+        print(f"Hankel parameters: H={args.dmd_H} | Truncation Ranks: state r={args.dmd_r}, augmented p={args.dmd_p}")
+        
+        try:
+            A_tilde, B_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U = run_dmdc(
+                ys[:, 0], u_data, H=args.dmd_H, r=args.dmd_r, p=args.dmd_p
+            )
+            
+            print("DMDc Complete!")
+            print(f"Augmented state-input matrix Omega shape: ({dmdc_X.shape[0] + dmdc_U.shape[0]}, {dmdc_X.shape[1]})")
+            print(f"Autonomous transition A_tilde shape: {A_tilde.shape}")
+            print(f"Control coupling B_tilde shape: {B_tilde.shape}")
+            print(f"Top 5 Intrinsic Singular Values: {s_x[:5]}")
+            print(f"Intrinsic Koopman Eigenvalues (first 5):\n{dmdc_eigenvalues[:5]}")
+            
+            if args.output:
+                dmdc_A_path = args.output.replace(".csv", "_dmdc_A.csv")
+                dmdc_B_path = args.output.replace(".csv", "_dmdc_B.csv")
+                np.savetxt(dmdc_A_path, A_tilde, delimiter=",")
+                np.savetxt(dmdc_B_path, B_tilde, delimiter=",")
+                print(f"Saved autonomous operator A_tilde to {dmdc_A_path}")
+                print(f"Saved control operator B_tilde to {dmdc_B_path}")
+                
+            if not args.no_plot or args.save_plot:
+                print("Generating DMDc matplotlib spectra and control plots...")
+                plot_dmdc_results(
+                    s_x, s_p, dmdc_eigenvalues, B_tilde, r=args.dmd_r, H=args.dmd_H, p=args.dmd_p,
+                    save_path=args.save_plot, show_plot=not args.no_plot
+                )
+        except Exception as e:
+            print(f"Error running DMDc: {e}")
+
     # 5. Visualization
     if not args.no_plot or args.save_plot:
         print("\nGenerating matplotlib visualization...")
         plot_results(
             t_span, ys, 
-            a=args.a, b=args.b, tau=args.tau, I_ext=args.I, 
+            a=args.a, b=args.b, tau=args.tau, I_type=args.I_type, I_val=args.I, 
             y0=y0, 
+            u_data=u_data,
             fitted_data=fitted_trajectory, 
             noisy_target=noisy_target,
             save_path=args.save_plot,
