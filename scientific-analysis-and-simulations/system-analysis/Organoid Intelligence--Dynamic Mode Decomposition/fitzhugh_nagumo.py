@@ -191,6 +191,64 @@ def fit_fhn_parameters(y0, t_span, noisy_target, I_ext, lr=0.02, steps=150):
 
 
 # =====================================================================
+# 2b. Hankel Dynamic Mode Decomposition (Hankel-DMD)
+# =====================================================================
+
+def run_hankel_dmd(v_data, H, r):
+    """
+    Computes Hankel Dynamic Mode Decomposition (Hankel-DMD) on time-series v_data.
+    
+    Args:
+        v_data: Time series array of shape (T,) (e.g. membrane potential v)
+        H: Delay embedding dimension (number of rows of Hankel matrix)
+        r: SVD truncation rank (energetic modes to keep)
+        
+    Returns:
+        A: Truncated dynamics matrix of shape (r, r)
+        eigenvalues: Complex eigenvalues of A representing Koopman modes
+        s: Full spectrum of singular values from the Hankel SVD
+        X: The time-shifted matrix from H[:, :-1]
+        Y: The time-shifted matrix from H[:, 1:]
+    """
+    v_data = jnp.asarray(v_data, dtype=jnp.float32)
+    T = len(v_data)
+    
+    if H >= T:
+        raise ValueError(f"Hankel delay embedding H ({H}) must be strictly less than time series length T ({T})")
+        
+    K = T - H + 1
+    
+    # 1. Construct Hankel matrix of shape (H, K)
+    # Using JAX to stack delay slices
+    H_matrix = jnp.stack([v_data[i : i + K] for i in range(H)], axis=0)
+    
+    # 2. Slice into shifted matrices X (1 to K-1) and Y (2 to K)
+    X = H_matrix[:, :-1]  # entries from first to T-1 of Hankel columns
+    Y = H_matrix[:, 1:]   # entries from second to T of Hankel columns
+    
+    # 3. Singular Value Decomposition of X: X = U * Sigma * V^T
+    U, s, V_T = jnp.linalg.svd(X, full_matrices=False)
+    V = V_T.T
+    
+    # Bound rank r to prevent index errors
+    r = min(r, U.shape[1])
+    
+    # 4. Truncate SVD matrices to rank r (energy modes)
+    U_r = U[:, :r]             # (H, r)
+    V_r = V[:, :r]             # (T-H, r)
+    s_r = s[:r]                # (r,)
+    
+    # 5. Define truncated transition matrix A = U_r.T @ Y @ V_r @ Sigma^-1
+    Sigma_inv = jnp.diag(1.0 / s_r)
+    A = U_r.T @ Y @ V_r @ Sigma_inv  # (r, r)
+    
+    # 6. Compute complex eigenvalues of the truncated operator
+    eigenvalues = jnp.linalg.eigvals(A)
+    
+    return A, eigenvalues, s, X, Y
+
+
+# =====================================================================
 # 3. Scientific Plotting and Visualization
 # =====================================================================
 
@@ -286,6 +344,61 @@ def plot_results(t_span, ys, a, b, tau, I_ext, y0, fitted_data=None, noisy_targe
         plt.close()
 
 
+def plot_dmd_results(s, eigenvalues, r, H, save_path=None, show_plot=True):
+    """
+    Plots the SVD Singular Value Spectrum and Koopman eigenvalues on the complex unit circle.
+    """
+    # Modern, sleek style settings
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # --- Left Plot: Singular Value Spectrum ---
+    ax1.semilogy(s, 'o-', color='#1f77b4', linewidth=2.0, markersize=5, label='Singular Values')
+    ax1.axvline(x=r-1, color='#d62728', linestyle='--', linewidth=1.5, label=f'Truncation Rank r={r}')
+    ax1.set_title("SVD Singular Value Spectrum (Energy Decay)", fontsize=13, fontweight='bold', pad=10)
+    ax1.set_xlabel("Singular Value Index", fontsize=11)
+    ax1.set_ylabel("Singular Value Magnitude (log scale)", fontsize=11)
+    ax1.legend(frameon=True, facecolor='white', framealpha=0.9)
+    ax1.grid(True, which="both", linestyle='--', alpha=0.5)
+    
+    # --- Right Plot: Complex Plane eigenvalues and unit circle ---
+    # Plot Unit Circle
+    theta = np.linspace(0, 2 * np.pi, 200)
+    ax2.plot(np.cos(theta), np.sin(theta), color='gray', linestyle='--', alpha=0.7, label='Unit Circle')
+    
+    # Plot DMD eigenvalues
+    ax2.scatter(eigenvalues.real, eigenvalues.imag, color='#2ca02c', edgecolor='black', s=80, zorder=5, label='DMD Eigenvalues')
+    
+    ax2.set_title(f"DMD Koopman Spectrum (Complex Plane, r={r})", fontsize=13, fontweight='bold', pad=10)
+    ax2.set_xlabel(r"Real Part $\Re(\lambda)$", fontsize=11)
+    ax2.set_ylabel(r"Imaginary Part $\Im(\lambda)$", fontsize=11)
+    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+    ax2.axvline(x=0, color='black', linewidth=0.8, alpha=0.5)
+    ax2.set_aspect('equal')
+    
+    # Legend placement
+    ax2.legend(frameon=True, facecolor='white', framealpha=0.9, loc='upper right')
+    
+    # Limit range to showcase the unit circle stability
+    ax2.set_xlim(-1.5, 1.5)
+    ax2.set_ylim(-1.5, 1.5)
+    
+    plt.suptitle(f"Hankel Dynamic Mode Decomposition (Hankel-DMD) Analysis\n(Delay coordinates H={H}, Truncated state space r={r})", 
+                 fontsize=15, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    
+    if save_path:
+        dmd_save_path = save_path.replace(".png", "_dmd.png")
+        plt.savefig(dmd_save_path, dpi=300)
+        print(f"Saved DMD visualization plot to {dmd_save_path}")
+        
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+
 # =====================================================================
 # 4. Main Script Execution
 # =====================================================================
@@ -300,6 +413,11 @@ def main():
     parser.add_argument('--b', type=float, default=0.8, help="Parameter b (default: 0.8)")
     parser.add_argument('--tau', type=float, default=12.5, help="Time constant tau (default: 12.5)")
     parser.add_argument('--I', type=float, default=0.5, help="Constant external current I (default: 0.5)")
+    
+    # Hankel-DMD settings
+    parser.add_argument('--dmd', action='store_true', help="Run Hankel Dynamic Mode Decomposition (Hankel-DMD)")
+    parser.add_argument('--dmd-H', type=int, default=50, help="Delay embedding dimension H for Hankel matrix (default: 50)")
+    parser.add_argument('--dmd-r', type=int, default=10, help="Truncation rank r for SVD modes (default: 10)")
     
     # Time settings
     parser.add_argument('--t-max', type=float, default=100.0, help="Total simulation time (default: 100.0)")
@@ -372,7 +490,39 @@ def main():
         except Exception as e:
             print(f"Error saving CSV: {e}")
             
-    # 4. Visualization
+    # 4. Hankel Dynamic Mode Decomposition (Hankel-DMD)
+    if args.dmd:
+        print(f"\nRunning Hankel-DMD Analysis on potential v...")
+        print(f"Hankel Matrix parameters: H={args.dmd_H}, Truncation Rank r={args.dmd_r}")
+        
+        try:
+            A_matrix, dmd_eigenvalues, s_vals, dmd_X, dmd_Y = run_hankel_dmd(
+                ys[:, 0], H=args.dmd_H, r=args.dmd_r
+            )
+            
+            print("Hankel-DMD Complete!")
+            print(f"Shifted Hankel X shape: {dmd_X.shape}")
+            print(f"Shifted Hankel Y shape: {dmd_Y.shape}")
+            print(f"Truncated Dynamic Matrix A shape: {A_matrix.shape}")
+            print(f"Top 5 Singular Values: {s_vals[:5]}")
+            print(f"Koopman Eigenvalues (first 5):\n{dmd_eigenvalues[:5]}")
+            
+            # Save matrix A to a separate text file or CSV if requested
+            if args.output:
+                dmd_output_path = args.output.replace(".csv", "_dmd_A.csv")
+                np.savetxt(dmd_output_path, A_matrix, delimiter=",")
+                print(f"Saved truncated transition matrix A to {dmd_output_path}")
+                
+            if not args.no_plot or args.save_plot:
+                print("Generating DMD matplotlib spectrum plots...")
+                plot_dmd_results(
+                    s_vals, dmd_eigenvalues, r=args.dmd_r, H=args.dmd_H,
+                    save_path=args.save_plot, show_plot=not args.no_plot
+                )
+        except Exception as e:
+            print(f"Error running DMD: {e}")
+
+    # 5. Visualization
     if not args.no_plot or args.save_plot:
         print("\nGenerating matplotlib visualization...")
         plot_results(
