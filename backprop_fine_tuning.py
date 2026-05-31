@@ -54,9 +54,9 @@ def main():
     parser.add_argument('--t-max', type=float, default=100.0, help="Simulation time")
     parser.add_argument('--dt', type=float, default=0.1, help="Time step")
     parser.add_argument('--lr', type=float, default=2e-3, help="Learning rate")
-    parser.add_argument('--steps', type=int, default=150, help="Optimization steps")
-    parser.add_argument('--n-predict', type=int, default=30, help="Prediction horizon for multiple-shooting")
-    parser.add_argument('--stride', type=int, default=5, help="Slicing stride for multiple-shooting")
+    parser.add_argument('--steps', type=int, default=40, help="Optimization steps")
+    parser.add_argument('--n-predict', type=int, default=350, help="Prediction horizon for multiple-shooting")
+    parser.add_argument('--stride', type=int, default=50, help="Slicing stride for multiple-shooting")
     parser.add_argument('--no-plot', action='store_true', help="Disable matplotlib plotting")
     args = parser.parse_args()
     
@@ -111,7 +111,8 @@ def main():
     u_seqs = jnp.stack(u_seqs_list, axis=0)
     z_targets = jnp.stack(z_targets_list, axis=0)
     
-    params = (A_init, B_init, C_init)
+    C_init_scaled = 0.05 * C_init
+    params = (A_init, B_init, C_init_scaled)
     
     def loss_fn(p_vars, z_in, u_in, z_tgt):
         A, B, C = p_vars
@@ -137,7 +138,7 @@ def main():
     print(f"Fine-tuning Bilinear DMDc operators using Backprop through Time ({args.steps} steps)...")
     for step in range(args.steps):
         params, opt_state, loss_val = train_step(params, opt_state, z_inits, u_seqs, z_targets)
-        if step % 15 == 0 or step == args.steps - 1:
+        if step % 5 == 0 or step == args.steps - 1:
             print(f"Step {step:03d} | Subspace Loss (MSE): {float(loss_val):.6e}")
             
     final_loss = float(loss_fn(params, z_inits, u_seqs, z_targets))
