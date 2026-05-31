@@ -186,11 +186,11 @@ def main():
         
         try:
             if args.batch:
-                A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U = run_dmdc(
+                A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U, dmdc_Ur = run_dmdc(
                     ys[:, :, 0], u_data_batch, H=args.dmd_H, r=args.dmd_r, p=args.dmd_p
                 )
             else:
-                A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U = run_dmdc(
+                A_tilde, B_tilde, C_tilde, dmdc_eigenvalues, s_x, s_p, dmdc_X, dmdc_Y, dmdc_U, dmdc_Ur = run_dmdc(
                     ys_single[:, 0], u_data, H=args.dmd_H, r=args.dmd_r, p=args.dmd_p
                 )
             
@@ -227,7 +227,6 @@ def main():
         plot_results(
             t_span, ys_single, 
             a=args.a, b=args.b, tau=args.tau, I_type=args.I_type, I_val=args.I if not args.batch else float(I_val_batch[0]), 
-            y0=y0, 
             u_data=u_data,
             fitted_data=fitted_trajectory, 
             noisy_target=noisy_target,

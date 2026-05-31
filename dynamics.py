@@ -117,4 +117,4 @@ def run_dmdc(v_data, u_data, H, r, p):
     
     eigenvalues = jnp.linalg.eigvals(A_tilde)
     
-    return A_tilde, B_tilde, C_tilde, eigenvalues, s_x, s_p, X_global, Y_global, Uc_global
+    return A_tilde, B_tilde, C_tilde, eigenvalues, s_x, s_p, X_global, Y_global, Uc_global, U_r
