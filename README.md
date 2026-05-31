@@ -11,6 +11,7 @@ This repository implements adaptive ODE solvers, gradient-based parameter estima
 ### FitzHugh-Nagumo Dynamics
 The neural excitability model is governed by:
 $$\frac{dv}{dt} = v - \frac{v^3}{3} - w + I_{ext}(t)$$
+
 $$\frac{dw}{dt} = \frac{v + a - b \cdot w}{\tau}$$
 where:
 - $v(t)$ is the membrane potential.
