@@ -26,6 +26,14 @@ def simulate_fhn(y0, t_span, a=0.7, b=0.8, tau=12.5, I_type='constant', I_val=0.
     )
     return sol.ys
 
+def simulate_fhn_batch(y0_batch, t_span, I_type, I_val_batch, a=0.7, b=0.8, tau=12.5, rtol=1e-6, atol=1e-6):
+    """Simulates a batch of FHN trajectories in parallel using jax.vmap."""
+    vmapped_solve = jax.vmap(
+        lambda y0, I_val: simulate_fhn(y0, t_span, a, b, tau, I_type, I_val, rtol, atol),
+        in_axes=(0, 0)
+    )
+    return vmapped_solve(y0_batch, I_val_batch)
+
 def fit_fhn_parameters(y0, t_span, noisy_target, I_type, I_val, lr=0.02, steps=150):
     """Fits the FHN parameters (a, b, tau) to noisy target data using Optax and JAX autodiff."""
     y0 = jnp.asarray(y0, dtype=jnp.float32)
