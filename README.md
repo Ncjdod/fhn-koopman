@@ -28,7 +28,9 @@ where:
 - $x_t \otimes u_t = u_t x_t \in \mathbb{R}^H$ represents the bilinear state-input interaction vector.
 
 By constructing the augmented state-control matrix $\Omega$:
+
 $$\Omega = \begin{bmatrix} X \\ U_c \\ X \otimes U_c \end{bmatrix}$$
+
 we compute SVD-truncated, low-dimensional operators:
 - $\tilde{A} \in \mathbb{R}^{r \times r}$ (intrinsic autonomous dynamics)
 - $\tilde{B} \in \mathbb{R}^{r \times 1}$ (linear control coupling)
