@@ -32,9 +32,9 @@ def main():
     parser.add_argument('--batch', action='store_true', help="Run in multi-trajectory batch mode")
     parser.add_argument('--batch-size', type=int, default=5, help="Number of trajectories in batch")
     
-    parser.add_argument('--dmd-H', type=int, default=30, help="Delay embedding dimension H")
-    parser.add_argument('--dmd-r', type=int, default=6, help="Truncation rank r for state projection")
-    parser.add_argument('--dmd-p', type=int, default=10, help="Truncation rank p for augmented space")
+    parser.add_argument('--dmd-H', type=int, default=70, help="Delay embedding dimension H")
+    parser.add_argument('--dmd-r', type=int, default=12, help="Truncation rank r for state projection")
+    parser.add_argument('--dmd-p', type=int, default=20, help="Truncation rank p for augmented space")
     
     parser.add_argument('--t-max', type=float, default=100.0, help="Total simulation time")
     parser.add_argument('--dt', type=float, default=0.1, help="Sampling time step")

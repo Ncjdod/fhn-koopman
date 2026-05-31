@@ -37,9 +37,9 @@ def main():
     
     parser.add_argument('--dmd', action='store_true', help="Run Hankel Dynamic Mode Decomposition (Hankel-DMD)")
     parser.add_argument('--dmdc', action='store_true', help="Run Dynamic Mode Decomposition with Control (DMDc)")
-    parser.add_argument('--dmd-H', type=int, default=50, help="Delay embedding dimension H for Hankel matrix (default: 50)")
-    parser.add_argument('--dmd-r', type=int, default=10, help="Truncation rank r for state projection subspace (default: 10)")
-    parser.add_argument('--dmd-p', type=int, default=15, help="Truncation rank p for DMDc augmented state-control matrix (default: 15)")
+    parser.add_argument('--dmd-H', type=int, default=70, help="Delay embedding dimension H for Hankel matrix (default: 70)")
+    parser.add_argument('--dmd-r', type=int, default=12, help="Truncation rank r for state projection subspace (default: 12)")
+    parser.add_argument('--dmd-p', type=int, default=20, help="Truncation rank p for DMDc augmented state-control matrix (default: 20)")
     
     parser.add_argument('--t-max', type=float, default=100.0, help="Total simulation time (default: 100.0)")
     parser.add_argument('--dt', type=float, default=0.1, help="Sampling time step (default: 0.1)")
