@@ -150,30 +150,3 @@ def plot_dmd_results(s, eigenvalues, r, H, save_path=None, show_plot=True):
     else:
         plt.close()
 
-def plot_reconstruction(t_span, v_true, v_pred, save_path=None, show_plot=True):
-    """Plots and overlays the actual simulated membrane potential against the recursive Bilinear DMDc prediction."""
-    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
-    fig = plt.figure(figsize=(12, 6))
-    
-    mse = np.mean((v_true - v_pred) ** 2)
-    
-    plt.plot(t_span, v_true, label='Ground Truth JAX Simulation', color='#1f77b4', linewidth=2.0)
-    plt.plot(t_span, v_pred, '--', label='Bilinear DMDc Recursive Prediction', color='#d62728', linewidth=2.0)
-    
-    plt.title(f"Bilinear DMDc Trajectory Reconstruction & Prediction\n(Reconstruction MSE: {mse:.6e})", 
-              fontsize=14, fontweight='bold', pad=12)
-    plt.xlabel("Time (dimensionless)", fontsize=12)
-    plt.ylabel("Membrane Potential v", fontsize=12)
-    plt.xlim(t_span[0], t_span[-1])
-    plt.legend(loc='upper right', frameon=True, facecolor='white', framealpha=0.9)
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300)
-        print(f"Saved trajectory reconstruction plot to {save_path}")
-        
-    if show_plot:
-        plt.show()
-    else:
-        plt.close()
