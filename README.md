@@ -17,7 +17,7 @@ $$\frac{dw}{dt} = \frac{v + a - b \cdot w}{\tau}$$
 where:
 - $v(t)$ is the membrane potential.
 - $w(t)$ is the recovery variable.
-- $I_{ext}(t)$ is a time-varying stimulation current (Constant, Step, Sine, or Pulse).
+- $I_{ext}(t)$ is a time-varying stimulation current.
 
 ### Bilinear DMDc
 Standard DMDc maps linear control inputs. To model non-linear modulation between state activation modes and control currents, we implement **Bilinear DMDc**:
