@@ -68,7 +68,11 @@ def apply_continuous_koopman(z, u, sigma_0, omega_0, sigma_I, omega_I):
     z_dot1 = omega * z0 + sigma * z1
     return jnp.stack([z_dot0, z_dot1], axis=2)
 
-def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles, m, n_predict, dt):
+def compute_loss_term(diff, power):
+    """Computes the scaled L_p norm (where p = power) to preserve scale and gradients."""
+    return (jnp.mean(jnp.abs(diff) ** power) + 1e-15) ** (1.0 / power)
+
+def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles, m, n_predict, dt, loss_power=2):
     """Computes the three Deep Koopman learning losses including Sobolev training terms."""
     params_enc = params_dict["enc"]
     params_dec = params_dict["dec"]
@@ -83,7 +87,7 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
     
     z_flat = forward_mlp(x_flat, params_enc)
     x_recon_flat = forward_mlp(z_flat, params_dec)
-    loss_recon_state = jnp.mean((x_flat - x_recon_flat) ** 2)
+    loss_recon_state = compute_loss_term(x_flat - x_recon_flat, loss_power)
     
     def reconstruct_jvp(x_val, x_dot_val):
         _, z_dot = jax.jvp(lambda x_in: forward_mlp(x_in, params_enc), (x_val,), (x_dot_val,))
@@ -91,7 +95,7 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
         return x_recon_dot
         
     x_recon_dot_flat = jax.vmap(reconstruct_jvp)(x_flat, x_dot_flat)
-    loss_recon_sobolev = jnp.mean((x_dot_flat - x_recon_dot_flat) ** 2)
+    loss_recon_sobolev = compute_loss_term(x_dot_flat - x_recon_dot_flat, loss_power)
     loss_recon = loss_recon_state + loss_recon_sobolev
     
     z_seq = z_flat.reshape(batch_size, T, m, 2)
@@ -105,7 +109,7 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
         z_curr_flat, u_curr_flat, sigma_0, omega_0, sigma_I, omega_I, dt
     )
     z_next_true_flat = z_next_true.reshape(-1, m, 2)
-    loss_lin_state = jnp.mean((z_next_true_flat - z_next_pred_flat) ** 2)
+    loss_lin_state = compute_loss_term(z_next_true_flat - z_next_pred_flat, loss_power)
     
     def encoder_jvp(x_val, x_dot_val):
         _, z_dot = jax.jvp(lambda x_in: forward_mlp(x_in, params_enc), (x_val,), (x_dot_val,))
@@ -117,7 +121,7 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
     z_flat_all = z_seq.reshape(-1, m, 2)
     u_flat_all = current_profiles.reshape(-1)
     z_dot_pred_flat = apply_continuous_koopman(z_flat_all, u_flat_all, sigma_0, omega_0, sigma_I, omega_I)
-    loss_lin_sobolev = jnp.mean((z_dot_flat - z_dot_pred_flat.reshape(-1, 2 * m)) ** 2)
+    loss_lin_sobolev = compute_loss_term(z_dot_flat - z_dot_pred_flat.reshape(-1, 2 * m), loss_power)
     loss_lin = loss_lin_state + loss_lin_sobolev
     
     stride = 20
@@ -149,7 +153,7 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
         z_preds_flat = z_preds.reshape(-1, 2 * m)
         x_preds_flat = forward_mlp(z_preds_flat, params_dec)
         x_preds = x_preds_flat.reshape(batch_size, n_predict, 2)
-        loss_pred_state = jnp.mean((x_preds - x_target) ** 2)
+        loss_pred_state = compute_loss_term(x_preds - x_target, loss_power)
         
         z_preds_m2 = z_preds.reshape(-1, m, 2)
         u_seq_flat = u_seq.reshape(-1)
@@ -160,7 +164,7 @@ def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles,
         x_dot_preds_flat = jax.vmap(decoder_jvp)(z_preds_flat_2m, z_dot_preds_flat_2m)
         x_dot_preds = x_dot_preds_flat.reshape(batch_size, n_predict, 2)
         
-        loss_pred_sobolev = jnp.mean((x_dot_preds - x_dot_target) ** 2)
+        loss_pred_sobolev = compute_loss_term(x_dot_preds - x_dot_target, loss_power)
         
         return loss_pred_state + loss_pred_sobolev
         
@@ -203,6 +207,7 @@ def main():
     parser.add_argument('--n-predict', type=int, default=100)
     parser.add_argument('--no-plot', action='store_true')
     parser.add_argument('--require-state', type=str, default=None)
+    parser.add_argument('--loss-power', type=int, default=2)
     args = parser.parse_args()
     
     print("Performing initial phase space analysis check...")
@@ -231,7 +236,7 @@ def main():
     def total_loss_fn(params_dict, trajectories, current_profiles):
         trajectory_dots = compute_fhn_derivatives(trajectories, current_profiles)
         l_rec, l_lin, l_pred = compute_losses(
-            params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt
+            params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt, args.loss_power
         )
         return weights[0] * l_rec + weights[1] * l_lin + weights[2] * l_pred
         
@@ -254,7 +259,7 @@ def main():
         if step % 20 == 0 or step == args.steps - 1:
             trajectory_dots = compute_fhn_derivatives(ys, u_data_batch)
             l_rec, l_lin, l_pred = compute_losses(
-                params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt
+                params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt, args.loss_power
             )
             print(f"Epoch {step:03d} | Total Loss: {float(loss_val):.6f} | Recon: {float(l_rec):.6f} | Lin: {float(l_lin):.6f} | Pred: {float(l_pred):.6f}")
             
