@@ -47,7 +47,13 @@ def main():
     parser.add_argument('--dt', type=float, default=0.01)
     parser.add_argument('--no-plot', action='store_true')
     parser.add_argument('--spike-threshold', type=float, default=0.0)
+    parser.add_argument('--require-state', type=str, default=None)
+    parser.add_argument('--I-val', type=float, default=0.5)
     args = parser.parse_args()
+    
+    from phase_space_analyzer import run_analysis
+    print("Performing initial phase space analysis check...")
+    run_analysis('sine', args.I_val, required_state=args.require_state, t_max=args.t_max, dt=args.dt)
     
     n_steps = int(args.t_max / args.dt) + 1
     t_span = jnp.linspace(0.0, args.t_max, n_steps)
