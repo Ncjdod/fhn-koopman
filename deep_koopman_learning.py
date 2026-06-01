@@ -1,5 +1,5 @@
 """
-Deep Koopman Learning for Global Dynamics in the FitzHugh-Nagumo Model.
+Deep Koopman Learning with Sobolev training for Global Dynamics in the FitzHugh-Nagumo Model.
 """
 
 import os
@@ -37,6 +37,14 @@ def forward_mlp(x, params):
     layer = params[-1]
     return jnp.dot(activation, layer["w"]) + layer["b"]
 
+def compute_fhn_derivatives(ys, u_data, a=0.7, b=0.8, tau=12.5):
+    """Computes the exact continuous-time FHN vector field derivatives for a batch of trajectories."""
+    v = ys[:, :, 0]
+    w = ys[:, :, 1]
+    dv = v - (v ** 3) / 3.0 - w + u_data
+    dw = (v + a - b * w) / tau
+    return jnp.stack([dv, dw], axis=2)
+
 def apply_koopman_operator(z, u, sigma_0, omega_0, sigma_I, omega_I, dt):
     """Applies the block-diagonal parameterized Koopman operator in latent space."""
     sigma = sigma_0 + sigma_I * u[:, None]
@@ -50,8 +58,18 @@ def apply_koopman_operator(z, u, sigma_0, omega_0, sigma_I, omega_I, dt):
     z_next1 = scale * (z0 * sin_w + z1 * cos_w)
     return jnp.stack([z_next0, z_next1], axis=2)
 
-def compute_losses(params_dict, trajectories, current_profiles, m, n_predict, dt):
-    """Computes the three Deep Koopman learning losses over a batch of trajectories."""
+def apply_continuous_koopman(z, u, sigma_0, omega_0, sigma_I, omega_I):
+    """Applies the block-diagonal continuous-time parameterized Koopman operator in latent space."""
+    sigma = sigma_0 + sigma_I * u[:, None]
+    omega = omega_0 + omega_I * u[:, None]
+    z0 = z[:, :, 0]
+    z1 = z[:, :, 1]
+    z_dot0 = sigma * z0 - omega * z1
+    z_dot1 = omega * z0 + sigma * z1
+    return jnp.stack([z_dot0, z_dot1], axis=2)
+
+def compute_losses(params_dict, trajectories, trajectory_dots, current_profiles, m, n_predict, dt):
+    """Computes the three Deep Koopman learning losses including Sobolev training terms."""
     params_enc = params_dict["enc"]
     params_dec = params_dict["dec"]
     sigma_0 = params_dict["sigma_0"]
@@ -61,9 +79,20 @@ def compute_losses(params_dict, trajectories, current_profiles, m, n_predict, dt
     
     batch_size, T, _ = trajectories.shape
     x_flat = trajectories.reshape(-1, 2)
+    x_dot_flat = trajectory_dots.reshape(-1, 2)
+    
     z_flat = forward_mlp(x_flat, params_enc)
     x_recon_flat = forward_mlp(z_flat, params_dec)
-    loss_recon = jnp.mean((x_flat - x_recon_flat) ** 2)
+    loss_recon_state = jnp.mean((x_flat - x_recon_flat) ** 2)
+    
+    def reconstruct_jvp(x_val, x_dot_val):
+        _, z_dot = jax.jvp(lambda x_in: forward_mlp(x_in, params_enc), (x_val,), (x_dot_val,))
+        _, x_recon_dot = jax.jvp(lambda z_in: forward_mlp(z_in, params_dec), (forward_mlp(x_val, params_enc),), (z_dot,))
+        return x_recon_dot
+        
+    x_recon_dot_flat = jax.vmap(reconstruct_jvp)(x_flat, x_dot_flat)
+    loss_recon_sobolev = jnp.mean((x_dot_flat - x_recon_dot_flat) ** 2)
+    loss_recon = loss_recon_state + loss_recon_sobolev
     
     z_seq = z_flat.reshape(batch_size, T, m, 2)
     z_curr = z_seq[:, :-1]
@@ -76,7 +105,20 @@ def compute_losses(params_dict, trajectories, current_profiles, m, n_predict, dt
         z_curr_flat, u_curr_flat, sigma_0, omega_0, sigma_I, omega_I, dt
     )
     z_next_true_flat = z_next_true.reshape(-1, m, 2)
-    loss_lin = jnp.mean((z_next_true_flat - z_next_pred_flat) ** 2)
+    loss_lin_state = jnp.mean((z_next_true_flat - z_next_pred_flat) ** 2)
+    
+    def encoder_jvp(x_val, x_dot_val):
+        _, z_dot = jax.jvp(lambda x_in: forward_mlp(x_in, params_enc), (x_val,), (x_dot_val,))
+        return z_dot
+        
+    z_dot_flat = jax.vmap(encoder_jvp)(x_flat, x_dot_flat)
+    z_dot_seq = z_dot_flat.reshape(batch_size, T, m, 2)
+    
+    z_flat_all = z_seq.reshape(-1, m, 2)
+    u_flat_all = current_profiles.reshape(-1)
+    z_dot_pred_flat = apply_continuous_koopman(z_flat_all, u_flat_all, sigma_0, omega_0, sigma_I, omega_I)
+    loss_lin_sobolev = jnp.mean((z_dot_flat - z_dot_pred_flat.reshape(-1, 2 * m)) ** 2)
+    loss_lin = loss_lin_state + loss_lin_sobolev
     
     stride = 20
     S = (T - 1 - n_predict) // stride
@@ -91,17 +133,36 @@ def compute_losses(params_dict, trajectories, current_profiles, m, n_predict, dt
         _, z_preds = jax.lax.scan(step, z_init, u_seq)
         return z_preds
         
+    def decoder_jvp(z_val, z_dot_val):
+        _, x_dot = jax.jvp(lambda z_in: forward_mlp(z_in, params_dec), (z_val,), (z_dot_val,))
+        return x_dot
+        
     def get_window_loss(idx):
         start = idx * stride
         z_init = jax.lax.dynamic_slice(z_seq, (0, start, 0, 0), (batch_size, 1, m, 2))
         z_init = jnp.squeeze(z_init, axis=1)
         u_seq = jax.lax.dynamic_slice(current_profiles, (0, start), (batch_size, n_predict))
         x_target = jax.lax.dynamic_slice(trajectories, (0, start + 1, 0), (batch_size, n_predict, 2))
+        x_dot_target = jax.lax.dynamic_slice(trajectory_dots, (0, start + 1, 0), (batch_size, n_predict, 2))
+        
         z_preds = jax.vmap(predict_forward_recursive, in_axes=(0, 0))(z_init, u_seq)
         z_preds_flat = z_preds.reshape(-1, 2 * m)
         x_preds_flat = forward_mlp(z_preds_flat, params_dec)
         x_preds = x_preds_flat.reshape(batch_size, n_predict, 2)
-        return jnp.mean((x_preds - x_target) ** 2)
+        loss_pred_state = jnp.mean((x_preds - x_target) ** 2)
+        
+        z_preds_m2 = z_preds.reshape(-1, m, 2)
+        u_seq_flat = u_seq.reshape(-1)
+        z_dot_preds_flat = apply_continuous_koopman(z_preds_m2, u_seq_flat, sigma_0, omega_0, sigma_I, omega_I)
+        
+        z_preds_flat_2m = z_preds.reshape(-1, 2 * m)
+        z_dot_preds_flat_2m = z_dot_preds_flat.reshape(-1, 2 * m)
+        x_dot_preds_flat = jax.vmap(decoder_jvp)(z_preds_flat_2m, z_dot_preds_flat_2m)
+        x_dot_preds = x_dot_preds_flat.reshape(batch_size, n_predict, 2)
+        
+        loss_pred_sobolev = jnp.mean((x_dot_preds - x_dot_target) ** 2)
+        
+        return loss_pred_state + loss_pred_sobolev
         
     window_losses = jax.vmap(get_window_loss)(jnp.arange(S))
     loss_pred = jnp.mean(window_losses)
@@ -127,7 +188,7 @@ def init_deep_koopman_params(m, key):
     }
 
 def main():
-    """Simulates FHN data, optimizes the deep Koopman networks, and validates."""
+    """Simulates FHN data, optimizes the deep Koopman networks using Sobolev training, and validates."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     plots_dir = os.path.join(script_dir, 'plots')
     os.makedirs(plots_dir, exist_ok=True)
@@ -168,8 +229,9 @@ def main():
     weights = (1.0, 1.0, 1.0)
     
     def total_loss_fn(params_dict, trajectories, current_profiles):
+        trajectory_dots = compute_fhn_derivatives(trajectories, current_profiles)
         l_rec, l_lin, l_pred = compute_losses(
-            params_dict, trajectories, current_profiles, args.latent_m, args.n_predict, args.dt
+            params_dict, trajectories, trajectory_dots, current_profiles, args.latent_m, args.n_predict, args.dt
         )
         return weights[0] * l_rec + weights[1] * l_lin + weights[2] * l_pred
         
@@ -186,12 +248,13 @@ def main():
         p_vars = optax.apply_updates(p_vars, updates)
         return p_vars, state, loss
         
-    print(f"Starting Deep Koopman training ({args.steps} epochs)...")
+    print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs)...")
     for step in range(args.steps):
         params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch)
         if step % 20 == 0 or step == args.steps - 1:
+            trajectory_dots = compute_fhn_derivatives(ys, u_data_batch)
             l_rec, l_lin, l_pred = compute_losses(
-                params, ys, u_data_batch, args.latent_m, args.n_predict, args.dt
+                params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt
             )
             print(f"Epoch {step:03d} | Total Loss: {float(loss_val):.6f} | Recon: {float(l_rec):.6f} | Lin: {float(l_lin):.6f} | Pred: {float(l_pred):.6f}")
             
@@ -225,7 +288,7 @@ def main():
     cheb_deep = float(jnp.max(jnp.abs(v_chirp_true - v_chirp_pred_deep)))
     mse_deep = float(jnp.mean((v_chirp_true - v_chirp_pred_deep) ** 2))
     
-    print("\nDeep Koopman Validation Performance:")
+    print("\nDeep Koopman Sobolev Validation Performance:")
     print(f"  - Membrane Potential MSE: {mse_deep:.6e}")
     print(f"  - Membrane Potential Chebyshev: {cheb_deep:.6e}")
     
@@ -243,8 +306,8 @@ def main():
         ax1.grid(True, linestyle='--', alpha=0.6)
         
         ax2.plot(t_span, v_chirp_true, label='Ground Truth FHN Simulation', color='#1f77b4', linewidth=2.0)
-        ax2.plot(t_span, v_chirp_pred_deep, '--', label=f'Deep Koopman Model (Cheb: {cheb_deep:.4f}, MSE: {mse_deep:.4f})', color='#2ca02c', linewidth=2.0)
-        ax2.set_title("Deep Koopman Learning Global Trajectory Validation (True vs Predicted)", fontsize=13, fontweight='bold')
+        ax2.plot(t_span, v_chirp_pred_deep, '--', label=f'Deep Koopman Sobolev (Cheb: {cheb_deep:.4f}, MSE: {mse_deep:.4f})', color='#2ca02c', linewidth=2.0)
+        ax2.set_title("Deep Koopman Sobolev Learning Global Trajectory Validation (True vs Predicted)", fontsize=13, fontweight='bold')
         ax2.set_xlabel("Time (dimensionless)", fontsize=11)
         ax2.set_ylabel("Membrane Potential v", fontsize=11)
         ax2.legend(loc='upper right', frameon=True, facecolor='white', framealpha=0.9)
