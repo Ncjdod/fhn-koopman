@@ -202,8 +202,8 @@ def main():
     parser.add_argument('--latent-m', type=int, default=3)
     parser.add_argument('--t-max', type=float, default=10.0)
     parser.add_argument('--dt', type=float, default=0.01)
-    parser.add_argument('--lr', type=float, default=2e-3)
-    parser.add_argument('--steps', type=int, default=200)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--steps', type=int, default=500)
     parser.add_argument('--n-predict', type=int, default=100)
     parser.add_argument('--no-plot', action='store_true')
     parser.add_argument('--require-state', type=str, default=None)
@@ -240,9 +240,14 @@ def main():
         )
         return weights[0] * l_rec + weights[1] * l_lin + weights[2] * l_pred
         
+    lr_schedule = optax.cosine_decay_schedule(
+        init_value=args.lr,
+        decay_steps=args.steps,
+        alpha=1e-2
+    )
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(learning_rate=args.lr)
+        optax.adam(learning_rate=lr_schedule)
     )
     opt_state = optimizer.init(params)
     
@@ -256,7 +261,7 @@ def main():
     print(f"Starting Deep Koopman Sobolev training ({args.steps} epochs)...")
     for step in range(args.steps):
         params, opt_state, loss_val = train_step(params, opt_state, ys, u_data_batch)
-        if step % 20 == 0 or step == args.steps - 1:
+        if step % (args.steps // 10) == 0 or step == args.steps - 1:
             trajectory_dots = compute_fhn_derivatives(ys, u_data_batch)
             l_rec, l_lin, l_pred = compute_losses(
                 params, ys, trajectory_dots, u_data_batch, args.latent_m, args.n_predict, args.dt, args.loss_power
